@@ -643,8 +643,19 @@ export default function Home() {
   const currentRound = editedRounds[gameState.currentRoundIndex];
 
   // Fast Money View
-  if (view === 'fastmoney') {
+  if (view === 'fastmoney' || gameState.fastMoneyMode) {
     const fastMoney = gameState.fastMoney;
+
+    if (!fastMoney) {
+      return (
+        <div className="min-h-screen bg-blue-950 flex items-center justify-center text-white">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-yellow-400 mx-auto mb-4"></div>
+            <p>Loading Fast Money...</p>
+          </div>
+        </div>
+      );
+    }
 
     const currentTeam = fastMoney.currentTeam;
     const currentTeamData = fastMoney[currentTeam];
