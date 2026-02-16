@@ -1,6 +1,6 @@
 "use client";
 import { useState, useEffect } from 'react';
-import { Settings, Monitor, Trophy, Copy, X as XIcon, Play, Music, Lightbulb, Eye } from 'lucide-react';
+import { Settings, Monitor, Trophy, Copy, Edit2, Save, Plus, X as XIcon, Play, Music, Lightbulb, Eye } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { db } from '@/lib/firebase';
 import { ref, onValue, set, update, get } from 'firebase/database';
@@ -128,7 +128,8 @@ export default function Home() {
   const [inputCode, setInputCode] = useState('');
   const [hostCode, setHostCode] = useState('');
   const [isHost, setIsHost] = useState(false);
-  const [rounds, setRounds] = useState<Round[]>([]);
+  const [editingQuestions, setEditingQuestions] = useState(false);
+  const [editedRounds, setEditedRounds] = useState<Round[]>([]);
   const [muted, setMuted] = useState(false);
   const [themeIsPlaying, setThemeIsPlaying] = useState(false);
   const [qrFullscreen, setQrFullscreen] = useState(false);
@@ -276,8 +277,11 @@ export default function Home() {
             }
           }
         }
-        previousRounds = data;
-        setRounds(data);
+        // don't overwrite the editor while the host is typing
+        if (!editingQuestions) {
+          previousRounds = data;
+          setEditedRounds(data);
+        }
       }
     });
 
@@ -285,7 +289,7 @@ export default function Home() {
       unsubGame();
       unsubRounds();
     };
-  }, [view, sessionCode, isHost]);
+  }, [view, sessionCode, isHost, editingQuestions]);
 
   const resetGame = () => {
     if (!sessionCode) return;
@@ -303,10 +307,39 @@ export default function Home() {
     });
   };
 
+  const openQuestionEditor = async () => {
+    if (!sessionCode) return;
+
+    const roundsRef = ref(db, `sessions/${sessionCode}/rounds`);
+
+    const roundsSnapshot = await get(roundsRef);
+    if (roundsSnapshot.exists()) {
+      const rounds = JSON.parse(JSON.stringify(roundsSnapshot.val()));
+      setEditedRounds(rounds);
+    }
+
+    setEditingQuestions(true);
+  };
+
+  const saveQuestions = async () => {
+    if (!sessionCode || !editedRounds.length) return;
+
+    try {
+      await update(ref(db), {
+        [`sessions/${sessionCode}/rounds`]: editedRounds,
+      });
+      setEditingQuestions(false);
+      alert('Questions saved successfully!');
+    } catch (error) {
+      console.error('Error saving questions:', error);
+      alert('Failed to save questions. Please try again.');
+    }
+  };
+
   const performAction = (action: string, payload: any = {}) => {
     if (!gameState || !sessionCode) return;
     const updates: any = {};
-    const currentRound = rounds[gameState.currentRoundIndex];
+    const currentRound = editedRounds[gameState.currentRoundIndex];
 
     switch (action) {
       case 'REVEAL_ANSWER':
@@ -333,13 +366,13 @@ export default function Home() {
         updates[`sessions/${sessionCode}/gameState/scores/${payload.team}`] = currentScore + gameState.roundPoints;
         updates[`sessions/${sessionCode}/gameState/roundPoints`] = 0;
         updates[`sessions/${sessionCode}/gameState/strikes`] = 0;
-        rounds[gameState.currentRoundIndex].answers.forEach((_: any, idx: number) => {
+        editedRounds[gameState.currentRoundIndex].answers.forEach((_: any, idx: number) => {
           updates[`sessions/${sessionCode}/rounds/${gameState.currentRoundIndex}/answers/${idx}/revealed`] = true;
         });
         break;
 
       case 'NEXT_ROUND':
-        if (gameState.currentRoundIndex < rounds.length - 1) {
+        if (gameState.currentRoundIndex < editedRounds.length - 1) {
           updates[`sessions/${sessionCode}/gameState/currentRoundIndex`] = gameState.currentRoundIndex + 1;
           updates[`sessions/${sessionCode}/gameState/roundPoints`] = 0;
           updates[`sessions/${sessionCode}/gameState/strikes`] = 0;
@@ -462,7 +495,7 @@ export default function Home() {
     );
   }
 
-  if (!gameState || !rounds.length) {
+  if (!gameState || !editedRounds.length) {
     return (
       <div className="text-white bg-blue-950 h-screen flex items-center justify-center">
         <div className="text-center">
@@ -473,7 +506,7 @@ export default function Home() {
     );
   }
 
-  const currentRound = rounds[gameState.currentRoundIndex];
+  const currentRound = editedRounds[gameState.currentRoundIndex];
 
   // Board View
   if (view === 'board') {
@@ -562,7 +595,7 @@ export default function Home() {
               <Settings className="text-blue-600" size={32} /> Host Control
             </h2>
             <span className="text-lg font-mono bg-blue-100 text-blue-800 px-4 py-2 rounded-lg font-bold border-2 border-blue-300">
-              Round {gameState.currentRoundIndex + 1} / {rounds.length}
+              Round {gameState.currentRoundIndex + 1} / {editedRounds.length}
             </span>
           </div>
 
@@ -633,6 +666,176 @@ export default function Home() {
               <div className="font-mono font-bold text-3xl text-yellow-900">{sessionCode}</div>
             </div>
             <p className="mt-4 text-gray-600">Click anywhere to close</p>
+          </div>
+        )}
+
+        <div className="bg-white p-6 rounded-xl shadow-lg border-2 border-purple-200">
+          <button
+            onClick={() => editingQuestions ? setEditingQuestions(false) : openQuestionEditor()}
+            className="w-full px-6 py-4 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-bold flex items-center justify-center gap-2 transition-colors shadow-md hover:shadow-lg text-lg"
+          >
+            {editingQuestions ? <XIcon size={24} /> : <Edit2 size={24} />}
+            {editingQuestions ? 'Close Question Editor' : 'Edit Questions'}
+          </button>
+        </div>
+
+        {editingQuestions && (
+          <div className="bg-white p-6 rounded-xl shadow-lg border-2 border-purple-300">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-2xl font-bold text-purple-900 flex items-center gap-2">
+                <Edit2 size={28} /> Question Editor
+              </h3>
+              <button
+                onClick={() => {
+                  const newRound: Round = {
+                    title: `Round ${editedRounds.length + 1}`,
+                    question: 'Enter your question here',
+                    multiplier: 1,
+                    hostTip: 'Add a tip for the host',
+                    answers: [
+                      { text: '', points: 0, revealed: false },
+                    ],
+                  };
+                  setEditedRounds([...editedRounds, newRound]);
+                }}
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold flex items-center gap-2 shadow-md transition"
+              >
+                <Plus size={20} /> Add Round
+              </button>
+            </div>
+            <div className="space-y-6">
+              {editedRounds.map((round, roundIdx) => (
+                <div key={roundIdx} className="border-2 border-purple-200 p-5 rounded-xl bg-purple-50/30">
+                  <div className="flex justify-between items-start mb-4">
+                    <h4 className="font-bold text-xl text-purple-900">Round {roundIdx + 1}</h4>
+                    <div className="flex items-center gap-3">
+                      <label className="text-sm font-semibold text-gray-700">Multiplier:</label>
+                      <select
+                        value={round.multiplier}
+                        onChange={(e) => {
+                          const newRounds = [...editedRounds];
+                          newRounds[roundIdx].multiplier = parseInt(e.target.value);
+                          setEditedRounds(newRounds);
+                        }}
+                        className="px-3 py-2 border-2 border-purple-300 rounded-lg font-bold bg-white"
+                      >
+                        <option value="1">1x</option>
+                        <option value="2">2x</option>
+                        <option value="3">3x</option>
+                      </select>
+                      {editedRounds.length > 1 && (
+                        <button
+                          onClick={() => {
+                            const newRounds = [...editedRounds];
+                            newRounds.splice(roundIdx, 1);
+                            setEditedRounds(newRounds);
+                          }}
+                          className="px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-bold transition"
+                          title="Delete Round"
+                        >
+                          <XIcon size={20} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="mb-3">
+                    <label className="text-xs font-semibold text-gray-600 uppercase mb-1 block">Host Tip</label>
+                    <input
+                      type="text"
+                      value={round.hostTip || ''}
+                      onChange={(e) => {
+                        const newRounds = [...editedRounds];
+                        newRounds[roundIdx].hostTip = e.target.value;
+                        setEditedRounds(newRounds);
+                      }}
+                      className="w-full px-3 py-2 border-2 border-gray-300 rounded-lg text-sm italic"
+                      placeholder="Add a helpful tip for the host..."
+                    />
+                  </div>
+                  <div className="mb-4">
+                    <label className="text-xs font-semibold text-gray-600 uppercase mb-1 block">Question</label>
+                    <textarea
+                      value={round.question}
+                      onChange={(e) => {
+                        const newRounds = [...editedRounds];
+                        newRounds[roundIdx].question = e.target.value;
+                        setEditedRounds(newRounds);
+                      }}
+                      rows={2}
+                      className="w-full px-4 py-3 border-2 border-purple-300 rounded-lg font-semibold text-lg resize-none"
+                      placeholder="Enter your question here..."
+                    />
+                  </div>
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-gray-600 uppercase mb-2 block">Answers</label>
+                    {round.answers.map((answer, ansIdx) => (
+                      <div key={ansIdx} className="flex gap-2">
+                        <input
+                          type="text"
+                          value={answer.text}
+                          onChange={(e) => {
+                            const newRounds = [...editedRounds];
+                            newRounds[roundIdx].answers[ansIdx].text = e.target.value;
+                            setEditedRounds(newRounds);
+                          }}
+                          className="flex-grow px-4 py-2 border-2 border-gray-300 rounded-lg focus:border-purple-400 focus:ring-2 focus:ring-purple-200"
+                          placeholder={`Answer ${ansIdx + 1}`}
+                        />
+                        <input
+                          type="number"
+                          value={answer.points}
+                          onChange={(e) => {
+                            const newRounds = [...editedRounds];
+                            newRounds[roundIdx].answers[ansIdx].points = parseInt(e.target.value) || 0;
+                            setEditedRounds(newRounds);
+                          }}
+                          className="w-24 px-3 py-2 border-2 border-gray-300 rounded-lg text-center font-mono font-bold focus:border-purple-400 focus:ring-2 focus:ring-purple-200"
+                          placeholder="Pts"
+                          min="0"
+                        />
+                        <button
+                          onClick={() => {
+                            const newRounds = [...editedRounds];
+                            newRounds[roundIdx].answers.splice(ansIdx, 1);
+                            setEditedRounds(newRounds);
+                          }}
+                          className="px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition"
+                          title="Delete Answer"
+                        >
+                          <XIcon size={20} />
+                        </button>
+                      </div>
+                    ))}
+                    {round.answers.length < 8 && (
+                      <button
+                        onClick={() => {
+                          const newRounds = [...editedRounds];
+                          newRounds[roundIdx].answers.push({ text: '', points: 0, revealed: false });
+                          setEditedRounds(newRounds);
+                        }}
+                        className="w-full px-4 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg font-semibold flex items-center justify-center gap-2 transition shadow-md"
+                      >
+                        <Plus size={16} /> Add Answer
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="mt-6 pt-6 border-t-2 border-purple-200">
+              <button
+                onClick={saveQuestions}
+                className="w-full px-6 py-4 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg hover:shadow-xl transition text-lg"
+              >
+                <Save size={24} />
+                Save All Questions
+              </button>
+              <p className="text-sm text-gray-600 text-center mt-3">
+                Changes will be saved to the session and persist until the game is reset
+              </p>
+            </div>
           </div>
         )}
 
@@ -729,7 +932,7 @@ export default function Home() {
                 onClick={() => performAction('NEXT_ROUND')}
                 className="w-full bg-gradient-to-r from-yellow-400 to-yellow-500 hover:from-yellow-500 hover:to-yellow-600 text-yellow-900 font-bold py-4 rounded-lg shadow-lg flex items-center justify-center gap-2 transition transform active:scale-95 hover:shadow-xl text-lg"
               >
-                {gameState.currentRoundIndex < rounds.length - 1 ? 'Start Next Round' : 'End Game'} <Play size={20} />
+                {gameState.currentRoundIndex < editedRounds.length - 1 ? 'Start Next Round' : 'End Game'} <Play size={20} />
               </button>
             </div>
           </div>
