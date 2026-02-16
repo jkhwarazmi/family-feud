@@ -1,23 +1,91 @@
 "use client";
 import { useState, useEffect } from 'react';
-import { Settings, Monitor, Trophy } from 'lucide-react';
+import { Settings, Monitor, Trophy, Copy, Edit2, Save, Plus, X as XIcon, Play, Music } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { db } from '@/lib/firebase';
-import { ref, onValue, set, update } from 'firebase/database';
-import { INITIAL_ROUNDS } from '@/lib/gameData';
+import { ref, onValue, set, update, get } from 'firebase/database';
+import { INITIAL_ROUNDS, FAST_MONEY_QUESTIONS, type Round, type FastMoneyQuestion } from '@/lib/gameData';
+import { nanoid } from 'nanoid';
+import { QRCodeSVG } from 'qrcode.react';
 
-// --- COMPONENTS (Unchanged) ---
+// --- AUDIO MANAGER ---
+class AudioManager {
+  private sounds: Map<string, HTMLAudioElement> = new Map();
+  private themeMusic: HTMLAudioElement | null = null;
+  private muted: boolean = false;
 
-const StrikeOverlay = ({ count, lastStrikeTime }: { count: number, lastStrikeTime: number }) => {
+  constructor() {
+    if (typeof window !== 'undefined') {
+      // Initialize placeholder sounds
+      this.sounds.set('strike', new Audio('/sounds/strike.mp3'));
+      this.sounds.set('reveal', new Audio('/sounds/reveal.mp3'));
+      this.sounds.set('win', new Audio('/sounds/win.mp3'));
+
+      this.themeMusic = new Audio('/sounds/theme.mp3');
+      this.themeMusic.loop = false;
+      this.themeMusic.volume = 0.3;
+    }
+  }
+
+  play(sound: string, isHost: boolean = false) {
+    if (this.muted || isHost) return; // Don't play sounds for host
+    const audio = this.sounds.get(sound);
+    if (audio) {
+      audio.currentTime = 0;
+      audio.play().catch(() => {});
+    }
+  }
+
+  startTheme(onEnd?: () => void) {
+    if (this.muted || !this.themeMusic) return;
+
+    // Add onended listener if callback provided
+    if (onEnd) {
+      this.themeMusic.onended = onEnd;
+    }
+
+    this.themeMusic.play().catch(() => {});
+  }
+
+  isThemePlaying() {
+    return this.themeMusic ? !this.themeMusic.paused : false;
+  }
+
+  stopTheme() {
+    if (this.themeMusic) {
+      this.themeMusic.pause();
+      this.themeMusic.currentTime = 0;
+    }
+  }
+
+  toggleMute() {
+    this.muted = !this.muted;
+    if (this.muted) {
+      this.stopTheme();
+    }
+    return this.muted;
+  }
+
+  getMuted() {
+    return this.muted;
+  }
+}
+
+const audioManager = new AudioManager();
+
+// --- COMPONENTS ---
+
+const StrikeOverlay = ({ count, lastStrikeTime, isHost }: { count: number, lastStrikeTime: number, isHost?: boolean }) => {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
     const isRecent = Date.now() - lastStrikeTime < 2000;
     if (count > 0 && isRecent) {
       setVisible(true);
+      audioManager.play('strike', isHost);
       const timer = setTimeout(() => setVisible(false), 3000);
       return () => clearTimeout(timer);
     }
-  }, [count, lastStrikeTime]);
+  }, [count, lastStrikeTime, isHost]);
 
   if (!visible) return null;
   return (
@@ -61,112 +129,542 @@ const AnswerSlot = ({ answer, index, multiplier }: { answer?: any, index: number
 // --- MAIN PAGE ---
 
 export default function Home() {
-  const [view, setView] = useState<'landing' | 'host' | 'board'>('landing');
+  const [view, setView] = useState<'landing' | 'host' | 'board' | 'fastmoney'>('landing');
   const [gameState, setGameState] = useState<any>(null);
+  const [sessionCode, setSessionCode] = useState('');
+  const [inputCode, setInputCode] = useState('');
   const [hostCode, setHostCode] = useState('');
+  const [isHost, setIsHost] = useState(false);
+  const [editingQuestions, setEditingQuestions] = useState(false);
+  const [editedRounds, setEditedRounds] = useState<Round[]>([]);
+  const [editedFastMoneyQuestions, setEditedFastMoneyQuestions] = useState<FastMoneyQuestion[]>([]);
+  const [muted, setMuted] = useState(false);
+  const [showFastMoneyOption, setShowFastMoneyOption] = useState(false);
+  const [themeIsPlaying, setThemeIsPlaying] = useState(false);
+  const [qrFullscreen, setQrFullscreen] = useState(false);
 
-  // 1. LISTEN TO FIREBASE (Replaces Polling)
+  // Check for URL query parameter to auto-join
   useEffect(() => {
-    if (view === 'landing') return;
-
-    const gameRef = ref(db, 'game');
-    const unsubscribe = onValue(gameRef, (snapshot) => {
-      const data = snapshot.val();
-      if (data) {
-        // Check for winner locally to trigger confetti
-        if (data.winner && !gameState?.winner && view === 'board') {
-            confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
-        }
-        setGameState(data);
-      } else {
-        // If DB is empty, initialize it
-        resetGame();
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      const code = params.get('code');
+      if (code) {
+        setInputCode(code);
+        // Auto-join as board if valid session code
+        setTimeout(() => {
+          const checkAndJoin = async () => {
+            const sessionRef = ref(db, `sessions/${code.toUpperCase()}`);
+            const snapshot = await get(sessionRef);
+            if (snapshot.exists()) {
+              setSessionCode(code.toUpperCase());
+              setIsHost(false);
+              setView('board');
+            }
+          };
+          checkAndJoin();
+        }, 100);
       }
-    });
+    }
+  }, []);
 
-    return () => unsubscribe();
-  }, [view]);
+  // Generate session code
+  const generateSessionCode = () => {
+    return nanoid(6).toUpperCase();
+  };
 
-  // 2. ACTIONS (Updates Firebase directly)
-  const resetGame = () => {
-    set(ref(db, 'game'), {
+  // Create new session
+  const createNewSession = async () => {
+    const newCode = generateSessionCode();
+    const newHostCode = `${newCode}-HOST`;
+
+    const sessionRef = ref(db, `sessions/${newCode}`);
+    await set(sessionRef, {
+      gameState: {
         currentRoundIndex: 0,
         scores: { team1: 0, team2: 0 },
         roundPoints: 0,
         strikes: 0,
         lastStrikeTime: 0,
-        rounds: INITIAL_ROUNDS,
         winner: null,
+        fastMoneyMode: false,
+      },
+      rounds: INITIAL_ROUNDS,
+      fastMoneyQuestions: FAST_MONEY_QUESTIONS,
+      hostCode: newHostCode,
+      createdAt: Date.now(),
     });
+
+    setSessionCode(newCode);
+    setHostCode(newHostCode);
+    setIsHost(true);
+    setView('host');
   };
 
+  // Join session as board
+  const joinAsBoard = async () => {
+    if (!inputCode) {
+      alert('Please enter a session code');
+      return;
+    }
+
+    const sessionRef = ref(db, `sessions/${inputCode.toUpperCase()}`);
+    const snapshot = await get(sessionRef);
+
+    if (!snapshot.exists()) {
+      alert('Session not found. Please check the code.');
+      return;
+    }
+
+    setSessionCode(inputCode.toUpperCase());
+    setIsHost(false);
+    setView('board');
+  };
+
+  // Join session as host
+  const joinAsHost = async () => {
+    if (!inputCode) {
+      alert('Please enter a host code');
+      return;
+    }
+
+    const code = inputCode.toUpperCase();
+    const parts = code.split('-');
+
+    if (parts.length !== 2 || parts[1] !== 'HOST') {
+      alert('Invalid host code format');
+      return;
+    }
+
+    const sessionRef = ref(db, `sessions/${parts[0]}`);
+    const snapshot = await get(sessionRef);
+
+    if (!snapshot.exists()) {
+      alert('Session not found');
+      return;
+    }
+
+    const data = snapshot.val();
+    if (data.hostCode !== code) {
+      alert('Invalid host code');
+      return;
+    }
+
+    setSessionCode(parts[0]);
+    setHostCode(code);
+    setIsHost(true);
+    setView('host');
+  };
+
+  // Listen to Firebase
+  useEffect(() => {
+    if (view === 'landing' || !sessionCode) return;
+
+    const gameRef = ref(db, `sessions/${sessionCode}/gameState`);
+    const roundsRef = ref(db, `sessions/${sessionCode}/rounds`);
+
+    let previousGameState: any = null;
+    let previousRounds: any = null;
+
+    const unsubGame = onValue(gameRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        // Winner announced - play theme music
+        if (data.winner && !previousGameState?.winner && view === 'board') {
+          confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+          audioManager.startTheme();
+        }
+
+        // Round transition - play win sound
+        if (previousGameState && data.currentRoundIndex > previousGameState.currentRoundIndex && !isHost && view === 'board') {
+          audioManager.play('win', isHost);
+        }
+
+        // Fast Money - play reveal or strike sound based on points
+        if (previousGameState && data.fastMoneyMode && data.fastMoney && previousGameState.fastMoney && !isHost && view === 'board') {
+          const currentTeam = data.fastMoney.currentTeam;
+          const prevTeamData = previousGameState.fastMoney[currentTeam];
+          const newTeamData = data.fastMoney[currentTeam];
+
+          if (prevTeamData && newTeamData && prevTeamData.questions && newTeamData.questions) {
+            // Check if a new answer was revealed
+            const newlyRevealed = newTeamData.questions.find((q: any, idx: number) =>
+              q.revealed && !prevTeamData.questions[idx]?.revealed
+            );
+
+            if (newlyRevealed) {
+              // Play reveal sound if points > 0, strike sound if 0 points
+              if (newlyRevealed.playerPoints > 0) {
+                audioManager.play('reveal', isHost);
+              } else {
+                audioManager.play('strike', isHost);
+              }
+            }
+          }
+        }
+
+        previousGameState = data;
+        setGameState(data);
+
+        // Check if we should show Fast Money option
+        if (data.currentRoundIndex === 2 && !data.fastMoneyMode) {
+          setShowFastMoneyOption(true);
+        }
+      }
+    });
+
+    const unsubRounds = onValue(roundsRef, (snapshot) => {
+      const data = snapshot.val();
+      if (data) {
+        // Detect if a new answer was revealed and play sound
+        if (previousRounds && previousRounds.length > 0 && !isHost && view === 'board') {
+          const currentRoundIndex = previousGameState?.currentRoundIndex || 0;
+          const prevRound = previousRounds[currentRoundIndex];
+          const newRound = data[currentRoundIndex];
+          if (prevRound && newRound) {
+            const newlyRevealed = newRound.answers.some((ans: any, idx: number) =>
+              ans.revealed && !prevRound.answers[idx]?.revealed
+            );
+            if (newlyRevealed) {
+              audioManager.play('reveal', isHost);
+            }
+          }
+        }
+        // Don't update editedRounds if user is actively editing to prevent input loss
+        if (!editingQuestions) {
+          previousRounds = data;
+          setEditedRounds(data);
+        }
+      }
+    });
+
+    return () => {
+      unsubGame();
+      unsubRounds();
+    };
+  }, [view, sessionCode, isHost, editingQuestions]);
+
+  // Reset Game
+  const resetGame = () => {
+    if (!sessionCode) return;
+
+    update(ref(db), {
+      [`sessions/${sessionCode}/gameState`]: {
+        currentRoundIndex: 0,
+        scores: { team1: 0, team2: 0 },
+        roundPoints: 0,
+        strikes: 0,
+        lastStrikeTime: 0,
+        winner: null,
+        fastMoneyMode: false,
+      },
+      [`sessions/${sessionCode}/rounds`]: INITIAL_ROUNDS,
+      [`sessions/${sessionCode}/fastMoneyQuestions`]: FAST_MONEY_QUESTIONS,
+    });
+    setShowFastMoneyOption(false);
+  };
+
+  // Open question editor
+  const openQuestionEditor = async () => {
+    // Ensure we have the latest rounds data before editing
+    if (!sessionCode) return;
+
+    const roundsRef = ref(db, `sessions/${sessionCode}/rounds`);
+    const fastMoneyRef = ref(db, `sessions/${sessionCode}/fastMoneyQuestions`);
+
+    const roundsSnapshot = await get(roundsRef);
+    if (roundsSnapshot.exists()) {
+      // Create a deep copy to avoid mutating the original
+      const rounds = JSON.parse(JSON.stringify(roundsSnapshot.val()));
+      setEditedRounds(rounds);
+    }
+
+    const fastMoneySnapshot = await get(fastMoneyRef);
+    if (fastMoneySnapshot.exists()) {
+      const fastMoneyQuestions = JSON.parse(JSON.stringify(fastMoneySnapshot.val()));
+      setEditedFastMoneyQuestions(fastMoneyQuestions);
+    } else {
+      // If no fast money questions exist, use defaults
+      setEditedFastMoneyQuestions(FAST_MONEY_QUESTIONS);
+    }
+
+    setEditingQuestions(true);
+  };
+
+  // Save edited questions
+  const saveQuestions = async () => {
+    if (!sessionCode || !editedRounds.length || !editedFastMoneyQuestions.length) return;
+
+    try {
+      await update(ref(db), {
+        [`sessions/${sessionCode}/rounds`]: editedRounds,
+        [`sessions/${sessionCode}/fastMoneyQuestions`]: editedFastMoneyQuestions,
+      });
+      setEditingQuestions(false);
+      alert('Questions saved successfully!');
+    } catch (error) {
+      console.error('Error saving questions:', error);
+      alert('Failed to save questions. Please try again.');
+    }
+  };
+
+  // Perform action
   const performAction = (action: string, payload: any = {}) => {
-    if (!gameState) return;
+    if (!gameState || !sessionCode) return;
     const updates: any = {};
-    const currentRound = gameState.rounds[gameState.currentRoundIndex];
+    const currentRound = editedRounds[gameState.currentRoundIndex];
 
     switch (action) {
-        case 'REVEAL_ANSWER':
-            const answer = currentRound.answers[payload.index];
-            if (!answer.revealed) {
-                // Update the specific answer's revealed state
-                updates[`game/rounds/${gameState.currentRoundIndex}/answers/${payload.index}/revealed`] = true;
-                // Add points to pot
-                updates['game/roundPoints'] = gameState.roundPoints + (answer.points * currentRound.multiplier);
-            }
-            break;
+      case 'REVEAL_ANSWER':
+        const answer = currentRound.answers[payload.index];
+        if (!answer.revealed) {
+          updates[`sessions/${sessionCode}/rounds/${gameState.currentRoundIndex}/answers/${payload.index}/revealed`] = true;
+          updates[`sessions/${sessionCode}/gameState/roundPoints`] = gameState.roundPoints + (answer.points * currentRound.multiplier);
+          // Sound will play on board view through Firebase update
+        }
+        break;
 
-        case 'ADD_STRIKE':
-            if (gameState.strikes < 3) {
-                updates['game/strikes'] = gameState.strikes + 1;
-                updates['game/lastStrikeTime'] = Date.now();
-            }
-            break;
+      case 'ADD_STRIKE':
+        if (gameState.strikes < 3) {
+          updates[`sessions/${sessionCode}/gameState/strikes`] = gameState.strikes + 1;
+          updates[`sessions/${sessionCode}/gameState/lastStrikeTime`] = Date.now();
+        }
+        break;
 
-        case 'CLEAR_STRIKES':
-            updates['game/strikes'] = 0;
-            break;
+      case 'CLEAR_STRIKES':
+        updates[`sessions/${sessionCode}/gameState/strikes`] = 0;
+        break;
 
-        case 'AWARD_ROUND':
-             // Add pot to team score
-             const currentScore = gameState.scores[payload.team];
-             updates[`game/scores/${payload.team}`] = currentScore + gameState.roundPoints;
-             updates['game/roundPoints'] = 0;
-             updates['game/strikes'] = 0;
-             // Reveal all answers for this round
-             gameState.rounds[gameState.currentRoundIndex].answers.forEach((_: any, idx: number) => {
-                 updates[`game/rounds/${gameState.currentRoundIndex}/answers/${idx}/revealed`] = true;
-             });
-             break;
+      case 'AWARD_ROUND':
+        const currentScore = gameState.scores[payload.team];
+        updates[`sessions/${sessionCode}/gameState/scores/${payload.team}`] = currentScore + gameState.roundPoints;
+        updates[`sessions/${sessionCode}/gameState/roundPoints`] = 0;
+        updates[`sessions/${sessionCode}/gameState/strikes`] = 0;
+        editedRounds[gameState.currentRoundIndex].answers.forEach((_: any, idx: number) => {
+          updates[`sessions/${sessionCode}/rounds/${gameState.currentRoundIndex}/answers/${idx}/revealed`] = true;
+        });
+        break;
 
-        case 'NEXT_ROUND':
-             if (gameState.currentRoundIndex < gameState.rounds.length - 1) {
-                 updates['game/currentRoundIndex'] = gameState.currentRoundIndex + 1;
-                 updates['game/roundPoints'] = 0;
-                 updates['game/strikes'] = 0;
-             } else {
-                 const winner = gameState.scores.team1 > gameState.scores.team2 ? "Team 1" : "Team 2";
-                 updates['game/winner'] = gameState.scores.team1 === gameState.scores.team2 ? "Draw" : winner;
-             }
-             break;
+      case 'NEXT_ROUND':
+        if (gameState.currentRoundIndex < editedRounds.length - 1) {
+          updates[`sessions/${sessionCode}/gameState/currentRoundIndex`] = gameState.currentRoundIndex + 1;
+          updates[`sessions/${sessionCode}/gameState/roundPoints`] = 0;
+          updates[`sessions/${sessionCode}/gameState/strikes`] = 0;
+        } else {
+          const winner = gameState.scores.team1 > gameState.scores.team2 ? "Team 1" : "Team 2";
+          updates[`sessions/${sessionCode}/gameState/winner`] = gameState.scores.team1 === gameState.scores.team2 ? "Draw" : winner;
+        }
+        break;
+
+      case 'UPDATE_MULTIPLIER':
+        updates[`sessions/${sessionCode}/rounds/${payload.roundIndex}/multiplier`] = payload.multiplier;
+        break;
+
+      case 'START_FAST_MONEY':
+        // Determine which team won the regular rounds (goes first)
+        const winningTeam = gameState.scores.team1 > gameState.scores.team2 ? 'team1' : 'team2';
+        const losingTeam = winningTeam === 'team1' ? 'team2' : 'team1';
+
+        // Get Fast Money questions from session (passed in payload)
+        const sessionFastMoneyQuestions = payload.fastMoneyQuestions || FAST_MONEY_QUESTIONS;
+
+        updates[`sessions/${sessionCode}/gameState/fastMoneyMode`] = true;
+        updates[`sessions/${sessionCode}/gameState/fastMoney`] = {
+          currentTeam: winningTeam,
+          winningTeam: winningTeam,
+          losingTeam: losingTeam,
+          currentQuestionIndex: 0,
+          team1: {
+            totalPoints: 0,
+            completed: false,
+            questions: sessionFastMoneyQuestions.map((q: any) => ({
+              ...q,
+              playerAnswer: '',
+              playerPoints: 0,
+              revealed: false,
+            })),
+          },
+          team2: {
+            totalPoints: 0,
+            completed: false,
+            questions: sessionFastMoneyQuestions.map((q: any) => ({
+              ...q,
+              playerAnswer: '',
+              playerPoints: 0,
+              revealed: false,
+            })),
+          },
+          finalWinner: null,
+        };
+        setView('fastmoney');
+        break;
+
+      case 'FAST_MONEY_REVEAL':
+        const currentTeam = gameState.fastMoney.currentTeam;
+        const teamData = gameState.fastMoney[currentTeam];
+        const fmQuestion = teamData.questions[payload.index];
+
+        if (!fmQuestion.revealed) {
+          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${payload.index}/revealed`] = true;
+          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${payload.index}/playerAnswer`] = payload.answer || 'No Answer';
+          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${payload.index}/playerPoints`] = payload.points || 0;
+          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/totalPoints`] = teamData.totalPoints + (payload.points || 0);
+        }
+        break;
+
+      case 'FAST_MONEY_NEXT':
+        const currentTeamFM = gameState.fastMoney.currentTeam;
+        const teamDataFM = gameState.fastMoney[currentTeamFM];
+
+        if (gameState.fastMoney.currentQuestionIndex < teamDataFM.questions.length - 1) {
+          updates[`sessions/${sessionCode}/gameState/fastMoney/currentQuestionIndex`] = gameState.fastMoney.currentQuestionIndex + 1;
+        }
+        break;
+
+      case 'FAST_MONEY_SWITCH_TEAM':
+        // Mark current team as completed
+        const completingTeam = gameState.fastMoney.currentTeam;
+        updates[`sessions/${sessionCode}/gameState/fastMoney/${completingTeam}/completed`] = true;
+
+        // Switch to other team
+        const nextTeam = completingTeam === 'team1' ? 'team2' : 'team1';
+        updates[`sessions/${sessionCode}/gameState/fastMoney/currentTeam`] = nextTeam;
+        updates[`sessions/${sessionCode}/gameState/fastMoney/currentQuestionIndex`] = 0;
+        break;
+
+      case 'FAST_MONEY_FINISH':
+        // Mark the second/losing team as completed (they just finished)
+        const currentFMTeam = gameState.fastMoney.currentTeam;
+        updates[`sessions/${sessionCode}/gameState/fastMoney/${currentFMTeam}/completed`] = true;
+
+        // Determine final winner
+        const team1Total = gameState.fastMoney.team1.totalPoints;
+        const team2Total = gameState.fastMoney.team2.totalPoints;
+        const fastMoneyWinner = team1Total > team2Total ? 'team1' : team2Total > team1Total ? 'team2' : 'tie';
+
+        updates[`sessions/${sessionCode}/gameState/fastMoney/finalWinner`] = fastMoneyWinner;
+        updates[`sessions/${sessionCode}/gameState/winner`] = fastMoneyWinner === 'tie' ? 'Draw' : (fastMoneyWinner === 'team1' ? 'Team 1' : 'Team 2');
+        break;
     }
 
     if (Object.keys(updates).length > 0) {
-        update(ref(db), updates);
+      update(ref(db), updates);
     }
   };
 
+  // Copy join link
+  const copyJoinLink = () => {
+    const link = `${window.location.origin}?code=${sessionCode}`;
+    navigator.clipboard.writeText(link);
+    alert('Join link copied to clipboard!');
+  };
+
+  // Toggle mute
+  const toggleMute = () => {
+    const newMuted = audioManager.toggleMute();
+    setMuted(newMuted);
+  };
+
+  // Stop theme music when leaving landing page
+  useEffect(() => {
+    if (view !== 'landing') {
+      audioManager.stopTheme();
+    }
+  }, [view]);
+
+  // Close QR fullscreen with ESC key
+  useEffect(() => {
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && qrFullscreen) {
+        setQrFullscreen(false);
+      }
+    };
+    window.addEventListener('keydown', handleEsc);
+    return () => window.removeEventListener('keydown', handleEsc);
+  }, [qrFullscreen]);
+
+  // Trigger confetti when Fast Money winner is revealed
+  useEffect(() => {
+    if (
+      gameState?.fastMoneyMode &&
+      gameState?.fastMoney?.finalWinner &&
+      view === 'fastmoney' &&
+      !isHost
+    ) {
+      confetti({ particleCount: 200, spread: 90, origin: { y: 0.6 } });
+      audioManager.startTheme();
+    }
+  }, [gameState?.fastMoney?.finalWinner, view, isHost]);
+
+  // Play theme music on button click (can replay when finished)
+  const playThemeMusic = () => {
+    if (audioManager.isThemePlaying()) return; // Don't restart if already playing
+
+    setThemeIsPlaying(true);
+    audioManager.startTheme(() => {
+      setThemeIsPlaying(false); // Reset when theme finishes
+    });
+  };
+
+  // Landing Page
   if (view === 'landing') {
     return (
-      <div className="min-h-screen bg-blue-950 flex flex-col items-center justify-center text-white font-sans p-4">
-        <h1 className="text-6xl font-extrabold text-yellow-400 mb-8 drop-shadow-md text-center">FAMILY FEUD</h1>
-        <div className="flex flex-col md:flex-row gap-4">
-          <button onClick={() => setView('board')} className="px-8 py-4 bg-blue-600 hover:bg-blue-500 rounded-lg text-xl font-bold transition shadow-lg border-b-4 border-blue-800">
-            Join as Board
-          </button>
-          <div className="flex flex-col gap-2">
-             <input type="password" placeholder="Host Code" className="px-4 py-2 text-black rounded shadow-inner" onChange={(e) => setHostCode(e.target.value)}/>
-             <button onClick={() => hostCode === 'admin' ? setView('host') : alert('Wrong Code (Try: admin)')} className="px-8 py-2 bg-yellow-500 hover:bg-yellow-400 text-blue-900 rounded-lg font-bold transition shadow-lg border-b-4 border-yellow-600">
+      <div className="min-h-screen bg-blue-950 flex flex-col items-center justify-center text-white font-sans p-4 relative">
+        {/* Theme Music Button */}
+        <button
+          onClick={playThemeMusic}
+          disabled={themeIsPlaying}
+          className={`absolute top-4 right-4 p-3 rounded-full border-2 transition-all ${
+            themeIsPlaying
+              ? 'bg-blue-800/50 border-blue-700 text-blue-500 cursor-not-allowed opacity-60'
+              : 'bg-yellow-500 border-yellow-400 text-blue-900 hover:bg-yellow-400 hover:scale-110'
+          }`}
+          title={themeIsPlaying ? 'Theme music playing...' : 'Play theme music'}
+        >
+          <Music size={24} className={themeIsPlaying ? 'animate-pulse' : ''} />
+        </button>
+
+        <h1 className="text-4xl md:text-6xl font-extrabold text-yellow-400 mb-8 drop-shadow-md text-center">FAMILY FEUD</h1>
+
+        <div className="bg-blue-900 p-6 md:p-8 rounded-xl shadow-2xl border-4 border-yellow-500 max-w-md w-full space-y-6">
+          <div className="space-y-3">
+            <h2 className="text-xl font-bold text-center text-yellow-400">Join Game</h2>
+            <input
+              type="text"
+              placeholder="Enter Session Code"
+              className="w-full px-4 py-3 text-black rounded shadow-inner text-center font-mono text-lg uppercase"
+              value={inputCode}
+              onChange={(e) => setInputCode(e.target.value)}
+            />
+            <button
+              onClick={joinAsBoard}
+              className="w-full px-8 py-4 bg-blue-600 hover:bg-blue-500 rounded-lg text-xl font-bold transition shadow-lg border-b-4 border-blue-800"
+            >
+              <Monitor className="inline mr-2" size={24} />
+              Join as Board
+            </button>
+          </div>
+
+          <div className="border-t-2 border-blue-800 pt-6 space-y-3">
+            <h2 className="text-xl font-bold text-center text-yellow-400">Host Game</h2>
+            <button
+              onClick={createNewSession}
+              className="w-full px-8 py-4 bg-yellow-500 hover:bg-yellow-400 text-blue-900 rounded-lg text-xl font-bold transition shadow-lg border-b-4 border-yellow-600"
+            >
+              <Settings className="inline mr-2" size={24} />
+              Create New Game
+            </button>
+            <div className="text-center text-sm text-blue-300">or</div>
+            <input
+              type="text"
+              placeholder="Enter Host Code"
+              className="w-full px-4 py-3 text-black rounded shadow-inner text-center font-mono uppercase"
+              value={inputCode}
+              onChange={(e) => setInputCode(e.target.value)}
+            />
+            <button
+              onClick={joinAsHost}
+              className="w-full px-8 py-3 bg-yellow-600 hover:bg-yellow-500 text-white rounded-lg font-bold transition shadow-lg"
+            >
               Login as Host
             </button>
           </div>
@@ -175,13 +673,443 @@ export default function Home() {
     );
   }
 
-  if (!gameState) return <div className="text-white bg-blue-950 h-screen flex items-center justify-center">Connecting to Game...</div>;
-  const currentRound = gameState.rounds[gameState.currentRoundIndex];
+  if (!gameState || !editedRounds.length) {
+    return (
+      <div className="text-white bg-blue-950 h-screen flex items-center justify-center">
+        <div className="text-center">
+          <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-yellow-400 mx-auto mb-4"></div>
+          <p>Connecting to Game...</p>
+        </div>
+      </div>
+    );
+  }
 
-  // --- BOARD VIEW ---
+  const currentRound = editedRounds[gameState.currentRoundIndex];
+
+  // Fast Money View
+  if (view === 'fastmoney' || gameState.fastMoneyMode) {
+    const fastMoney = gameState.fastMoney;
+
+    if (!fastMoney) {
+      return (
+        <div className="min-h-screen bg-blue-950 flex items-center justify-center text-white">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-yellow-400 mx-auto mb-4"></div>
+            <p>Loading Fast Money...</p>
+          </div>
+        </div>
+      );
+    }
+
+    const currentTeam = fastMoney.currentTeam;
+    const currentTeamData = fastMoney[currentTeam];
+    const currentQ = currentTeamData.questions[fastMoney.currentQuestionIndex];
+    const allRevealed = currentTeamData.questions.every((q: any) => q.revealed);
+    const bothTeamsComplete = fastMoney.team1.completed && fastMoney.team2.completed;
+
+    // Get the first team's (winning team's) answer for this question index (to disable for second/losing team)
+    const winningTeam = fastMoney.winningTeam;
+    const losingTeam = fastMoney.losingTeam;
+    const firstTeamAnswer = currentTeam === losingTeam
+      ? fastMoney[winningTeam].questions[fastMoney.currentQuestionIndex]?.playerAnswer
+      : null;
+
+    // Host View
+    if (isHost) {
+      return (
+        <div className="min-h-screen bg-gray-50 p-4 md:p-6 font-sans text-gray-900">
+          <div className="max-w-6xl mx-auto space-y-6">
+            {/* Header */}
+            <div className="bg-gradient-to-r from-purple-600 to-purple-700 text-white p-6 rounded-xl shadow-xl">
+              <div className="flex justify-between items-center">
+                <h1 className="text-3xl font-bold flex items-center gap-3">
+                  <span className="text-4xl">⚡</span> FAST MONEY
+                </h1>
+                <div className="text-sm opacity-90">
+                  {fastMoney.winningTeam === 'team1' ? 'Team 1' : 'Team 2'} goes first (won regular rounds)
+                </div>
+              </div>
+            </div>
+
+            {/* Both Teams Scores */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className={`p-6 rounded-xl shadow-lg border-4 transition-all ${
+                currentTeam === 'team1'
+                  ? 'bg-blue-600 text-white border-blue-400'
+                  : 'bg-white text-gray-900 border-gray-300'
+              }`}>
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">TEAM 1</h2>
+                  <div className="text-6xl font-black">{fastMoney.team1.totalPoints}</div>
+                  <div className="text-sm mt-2 opacity-75">
+                    {fastMoney.team1.completed ? '✓ Complete' : currentTeam === 'team1' ? '▶ Playing' : 'Waiting...'}
+                  </div>
+                </div>
+              </div>
+              <div className={`p-6 rounded-xl shadow-lg border-4 transition-all ${
+                currentTeam === 'team2'
+                  ? 'bg-blue-600 text-white border-blue-400'
+                  : 'bg-white text-gray-900 border-gray-300'
+              }`}>
+                <div className="text-center">
+                  <h2 className="text-2xl font-bold mb-2">TEAM 2</h2>
+                  <div className="text-6xl font-black">{fastMoney.team2.totalPoints}</div>
+                  <div className="text-sm mt-2 opacity-75">
+                    {fastMoney.team2.completed ? '✓ Complete' : currentTeam === 'team2' ? '▶ Playing' : 'Waiting...'}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Questions List */}
+            <div className="bg-white p-6 rounded-xl shadow-lg border-2 border-purple-200">
+              <h3 className="text-xl font-bold mb-4 text-purple-900">
+                {currentTeam === 'team1' ? 'Team 1' : 'Team 2'} Questions
+              </h3>
+              <div className="space-y-3">
+                {currentTeamData.questions.map((q: any, idx: number) => (
+                  <div
+                    key={idx}
+                    className={`p-4 rounded-lg border-2 ${
+                      idx === fastMoney.currentQuestionIndex
+                        ? 'border-purple-500 bg-purple-50'
+                        : q.revealed
+                        ? 'border-green-300 bg-green-50'
+                        : 'border-gray-200 bg-white'
+                    }`}
+                  >
+                    <div className="flex justify-between items-start mb-2">
+                      <div className="flex-1">
+                        <span className="font-bold text-gray-500 mr-2">Q{idx + 1}:</span>
+                        <span className="font-semibold">{q.question}</span>
+                      </div>
+                      {q.revealed && (
+                        <span className="text-green-600 font-bold ml-2">{q.playerPoints} pts</span>
+                      )}
+                    </div>
+                    {q.revealed && (
+                      <div className="text-sm text-gray-600 mt-2">
+                        <div>
+                          <strong>Answer:</strong> {q.playerAnswer === 'No Answer / Pass' ? '❌ No Answer / Pass' : q.playerAnswer}
+                        </div>
+                        <div className="text-xs text-gray-500 mt-1">
+                          <strong>All Answers:</strong> {q.answers.map((a: any) => `${a.text} (${a.score})`).join(', ')}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Current Question Controls */}
+            {!allRevealed && (
+              <div className="bg-white p-6 rounded-xl shadow-lg border-2 border-blue-200">
+                <h3 className="text-xl font-bold mb-4 text-blue-900">
+                  Current Question {fastMoney.currentQuestionIndex + 1} of {currentTeamData.questions.length}
+                </h3>
+                <div className="bg-blue-50 p-4 rounded-lg mb-4 border-2 border-blue-200">
+                  <p className="text-2xl font-bold text-blue-900">{currentQ.question}</p>
+                </div>
+
+                {!currentQ.revealed ? (
+                  <div className="space-y-4">
+                    <p className="text-sm font-semibold text-gray-700 mb-2">Select the answer the player gave:</p>
+                    {currentTeam === losingTeam && firstTeamAnswer && (
+                      <p className="text-xs text-red-600 font-semibold">
+                        ⚠️ First team selected: {firstTeamAnswer} (disabled below)
+                      </p>
+                    )}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {currentQ.answers.map((answer: any, idx: number) => {
+                        const isDisabled = firstTeamAnswer === answer.text;
+                        return (
+                          <button
+                            key={idx}
+                            onClick={() => !isDisabled && performAction('FAST_MONEY_REVEAL', {
+                              index: fastMoney.currentQuestionIndex,
+                              answer: answer.text,
+                              points: answer.score,
+                            })}
+                            disabled={isDisabled}
+                            className={`${
+                              isDisabled
+                                ? 'bg-gray-400 cursor-not-allowed opacity-50'
+                                : idx === 0
+                                ? 'bg-green-600 hover:bg-green-700'
+                                : 'bg-blue-600 hover:bg-blue-700'
+                            } text-white font-bold py-3 px-4 rounded-lg shadow-md transition text-left`}
+                          >
+                            <div className="flex justify-between items-center">
+                              <span>{isDisabled && '🚫 '}{answer.text}</span>
+                              <span className="ml-2 bg-white bg-opacity-20 px-2 py-1 rounded text-sm">
+                                {answer.score} pts
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                      <button
+                        onClick={() => performAction('FAST_MONEY_REVEAL', {
+                          index: fastMoney.currentQuestionIndex,
+                          answer: 'No Answer / Pass',
+                          points: 0,
+                        })}
+                        className="bg-gray-500 hover:bg-gray-600 text-white font-bold py-3 px-4 rounded-lg shadow-md transition"
+                      >
+                        No Answer / Pass (0 pts)
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <button
+                      onClick={() => performAction('FAST_MONEY_NEXT')}
+                      disabled={fastMoney.currentQuestionIndex >= currentTeamData.questions.length - 1}
+                      className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-4 rounded-lg shadow-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Next Question →
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Switch Team / Finish */}
+            {allRevealed && !bothTeamsComplete && (
+              <div className="bg-gradient-to-r from-blue-600 to-blue-700 p-8 rounded-xl shadow-xl text-white text-center">
+                <h2 className="text-2xl font-black mb-4">
+                  {currentTeam === 'team1' ? 'Team 1' : 'Team 2'} Completed!
+                </h2>
+                <div className="text-5xl font-black mb-6">
+                  {currentTeamData.totalPoints} Points
+                </div>
+                <button
+                  onClick={() => performAction('FAST_MONEY_SWITCH_TEAM')}
+                  className="px-8 py-4 bg-yellow-400 hover:bg-yellow-500 text-blue-900 rounded-xl font-bold text-lg shadow-lg transition"
+                >
+                  Switch to {currentTeam === 'team1' ? 'Team 2' : 'Team 1'} →
+                </button>
+              </div>
+            )}
+
+            {/* Final Results */}
+            {bothTeamsComplete && !fastMoney.finalWinner && (
+              <div className="bg-white p-8 rounded-xl shadow-xl border-4 border-purple-300 text-center">
+                <h2 className="text-3xl font-black mb-6">Both Teams Complete!</h2>
+                <div className="grid grid-cols-2 gap-6 mb-6">
+                  <div>
+                    <div className="text-2xl font-bold mb-2">Team 1</div>
+                    <div className="text-5xl font-black">{fastMoney.team1.totalPoints}</div>
+                  </div>
+                  <div>
+                    <div className="text-2xl font-bold mb-2">Team 2</div>
+                    <div className="text-5xl font-black">{fastMoney.team2.totalPoints}</div>
+                  </div>
+                </div>
+                <button
+                  onClick={() => performAction('FAST_MONEY_FINISH')}
+                  className="px-8 py-4 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white rounded-xl font-bold text-lg shadow-lg transition"
+                >
+                  Reveal Winner! 🏆
+                </button>
+              </div>
+            )}
+
+            {/* Winner Declared */}
+            {fastMoney.finalWinner && (
+              <div className="bg-gradient-to-br from-yellow-400 to-yellow-500 p-8 rounded-xl shadow-xl border-4 border-yellow-600 text-center">
+                <h2 className="text-4xl font-black mb-4 text-yellow-900">
+                  🏆 WINNER: {fastMoney.finalWinner === 'team1' ? 'TEAM 1' : fastMoney.finalWinner === 'team2' ? 'TEAM 2' : 'TIE'} 🏆
+                </h2>
+                <div className="grid grid-cols-2 gap-6 mb-6 text-yellow-900">
+                  <div className={fastMoney.finalWinner === 'team1' ? 'font-black text-green-700' : ''}>
+                    <div className="text-2xl font-bold mb-2">Team 1</div>
+                    <div className="text-5xl font-black">{fastMoney.team1.totalPoints}</div>
+                  </div>
+                  <div className={fastMoney.finalWinner === 'team2' ? 'font-black text-green-700' : ''}>
+                    <div className="text-2xl font-bold mb-2">Team 2</div>
+                    <div className="text-5xl font-black">{fastMoney.team2.totalPoints}</div>
+                  </div>
+                </div>
+                <p className="text-xl text-yellow-900 mb-6 font-bold">
+                  The game will show the winner screen!
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // Board View
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-purple-900 via-purple-950 to-black p-4 md:p-8 flex flex-col text-white font-sans">
+        {/* Audio Control - Universal Mute Button */}
+        <button
+          onClick={toggleMute}
+          className={`absolute top-4 right-4 z-20 p-3 rounded-full border-2 transition-all ${
+            muted
+              ? 'bg-red-600 border-red-500 hover:bg-red-500'
+              : 'bg-green-600 border-green-500 hover:bg-green-500'
+          }`}
+          title={muted ? 'Unmute audio' : 'Mute audio'}
+        >
+          <Music size={24} className={muted ? 'opacity-50' : 'opacity-100'} />
+        </button>
+
+        {/* Header */}
+        <div className="mb-6 text-center">
+          <h1 className="text-5xl md:text-7xl font-black text-yellow-400 mb-4 drop-shadow-[0_0_30px_rgba(250,204,21,0.5)]">
+            ⚡ FAST MONEY ⚡
+          </h1>
+          <div className="text-xl text-yellow-200">
+            {currentTeam === 'team1' ? 'TEAM 1' : 'TEAM 2'} Playing Now
+          </div>
+        </div>
+
+        {/* Both Teams Scores */}
+        <div className="grid grid-cols-2 gap-4 mb-6 max-w-4xl mx-auto w-full">
+          <div className={`p-4 rounded-xl border-4 transition-all ${
+            currentTeam === 'team1'
+              ? 'bg-blue-600 border-blue-400 scale-105'
+              : 'bg-white/10 border-white/30'
+          }`}>
+            <div className="text-center">
+              <div className="text-xl font-bold mb-1">TEAM 1</div>
+              <div className="text-5xl font-black">{fastMoney.team1.totalPoints}</div>
+              <div className="text-xs mt-1 opacity-75">
+                {fastMoney.team1.completed ? '✓ Complete' : currentTeam === 'team1' ? '▶ Playing' : 'Up Next'}
+              </div>
+            </div>
+          </div>
+          <div className={`p-4 rounded-xl border-4 transition-all ${
+            currentTeam === 'team2'
+              ? 'bg-blue-600 border-blue-400 scale-105'
+              : 'bg-white/10 border-white/30'
+          }`}>
+            <div className="text-center">
+              <div className="text-xl font-bold mb-1">TEAM 2</div>
+              <div className="text-5xl font-black">{fastMoney.team2.totalPoints}</div>
+              <div className="text-xs mt-1 opacity-75">
+                {fastMoney.team2.completed ? '✓ Complete' : currentTeam === 'team2' ? '▶ Playing' : 'Up Next'}
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Current Team Questions */}
+        {!bothTeamsComplete && (
+          <div className="w-full max-w-5xl mx-auto space-y-3">
+            {currentTeamData.questions.map((q: any, idx: number) => (
+              <div
+                key={idx}
+                className={`transition-all duration-500 ${
+                  q.revealed ? 'opacity-100 scale-100' : 'opacity-50 scale-95'
+                }`}
+              >
+                <div className="bg-gradient-to-r from-purple-700 to-purple-800 p-4 rounded-xl border-2 border-purple-500 shadow-xl">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="flex items-center gap-3 flex-1">
+                      <span className="bg-purple-900 text-yellow-400 font-black text-xl w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0">
+                        {idx + 1}
+                      </span>
+                      <span className="text-lg md:text-xl font-bold">{q.question}</span>
+                    </div>
+                    {q.revealed && (
+                      <div className="flex items-center gap-3">
+                        {q.playerAnswer === 'No Answer / Pass' ? (
+                          <div className="text-5xl text-red-500 mr-3">❌</div>
+                        ) : (
+                          <div className="text-sm text-yellow-300 font-semibold mr-3">{q.playerAnswer}</div>
+                        )}
+                        <div className="bg-yellow-400 text-purple-900 font-black text-3xl px-4 py-2 rounded-lg shadow-lg">
+                          {q.playerPoints}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Both Teams Complete - Show Comparison */}
+        {bothTeamsComplete && (
+          <div className="w-full max-w-6xl mx-auto">
+            <div className="grid grid-cols-2 gap-6">
+              {/* Team 1 Results */}
+              <div className="space-y-2">
+                <h3 className="text-2xl font-black text-center mb-3 text-blue-300">TEAM 1</h3>
+                {fastMoney.team1.questions.map((q: any, idx: number) => (
+                  <div key={idx} className="bg-blue-900/50 p-3 rounded-lg border border-blue-700">
+                    <div className="flex justify-between items-center">
+                      <div className="flex-1">
+                        <div className="text-sm font-bold">{q.question}</div>
+                        <div className="text-xs text-blue-300">
+                          {q.playerAnswer === 'No Answer / Pass' ? '❌ No Answer' : q.playerAnswer}
+                        </div>
+                        <div className="text-xs text-gray-400 mt-1">Top: {q.answers[0].text} ({q.answers[0].score})</div>
+                      </div>
+                      <div className="text-2xl font-black text-yellow-400">{q.playerPoints}</div>
+                    </div>
+                  </div>
+                ))}
+                <div className="bg-blue-600 p-4 rounded-xl text-center border-2 border-blue-400">
+                  <div className="text-sm">Total</div>
+                  <div className="text-5xl font-black">{fastMoney.team1.totalPoints}</div>
+                </div>
+              </div>
+
+              {/* Team 2 Results */}
+              <div className="space-y-2">
+                <h3 className="text-2xl font-black text-center mb-3 text-red-300">TEAM 2</h3>
+                {fastMoney.team2.questions.map((q: any, idx: number) => (
+                  <div key={idx} className="bg-red-900/50 p-3 rounded-lg border border-red-700">
+                    <div className="flex justify-between items-center">
+                      <div className="flex-1">
+                        <div className="text-sm font-bold">{q.question}</div>
+                        <div className="text-xs text-red-300">
+                          {q.playerAnswer === 'No Answer / Pass' ? '❌ No Answer' : q.playerAnswer}
+                        </div>
+                        <div className="text-xs text-gray-400 mt-1">Top: {q.answers[0].text} ({q.answers[0].score})</div>
+                      </div>
+                      <div className="text-2xl font-black text-yellow-400">{q.playerPoints}</div>
+                    </div>
+                  </div>
+                ))}
+                <div className="bg-red-600 p-4 rounded-xl text-center border-2 border-red-400">
+                  <div className="text-sm">Total</div>
+                  <div className="text-5xl font-black">{fastMoney.team2.totalPoints}</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Winner Announcement */}
+            {fastMoney.finalWinner && (
+              <div className="mt-8 text-center">
+                <div className="animate-bounce">
+                  <div className="text-8xl mb-4">🏆</div>
+                  <div className="text-6xl font-black text-yellow-400 drop-shadow-[0_0_30px_rgba(250,204,21,0.8)]">
+                    {fastMoney.finalWinner === 'team1' ? 'TEAM 1 WINS!' : fastMoney.finalWinner === 'team2' ? 'TEAM 2 WINS!' : 'IT\'S A TIE!'}
+                  </div>
+                  <div className="text-3xl mt-4 text-yellow-200">
+                    {fastMoney.team1.totalPoints} - {fastMoney.team2.totalPoints}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Board View
   if (view === 'board') {
     if (gameState.winner) {
-       return (
+      return (
         <div className="min-h-screen bg-blue-950 flex flex-col items-center justify-center text-white">
           <Trophy size={120} className="text-yellow-400 mb-6 animate-bounce" />
           <h1 className="text-6xl font-bold mb-4">WINNER</h1>
@@ -190,12 +1118,26 @@ export default function Home() {
             Team 1: {gameState.scores.team1}  |  Team 2: {gameState.scores.team2}
           </div>
         </div>
-       )
+      );
     }
 
     return (
-      <div className="min-h-screen bg-blue-950 p-6 flex flex-col items-center font-sans overflow-hidden bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-blue-900 via-blue-950 to-black">
-        <StrikeOverlay count={gameState.strikes} lastStrikeTime={gameState.lastStrikeTime} />
+      <div className="min-h-screen bg-blue-950 p-4 md:p-6 flex flex-col items-center font-sans overflow-hidden bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-blue-900 via-blue-950 to-black relative">
+        <StrikeOverlay count={gameState.strikes} lastStrikeTime={gameState.lastStrikeTime} isHost={isHost} />
+
+        {/* Audio Control - Universal Mute Button */}
+        <button
+          onClick={toggleMute}
+          className={`absolute top-4 right-4 z-20 p-3 rounded-full border-2 transition-all ${
+            muted
+              ? 'bg-red-600 border-red-500 hover:bg-red-500'
+              : 'bg-green-600 border-green-500 hover:bg-green-500'
+          }`}
+          title={muted ? 'Unmute audio' : 'Mute audio'}
+        >
+          <Music size={24} className={muted ? 'opacity-50' : 'opacity-100'} />
+        </button>
+
         <div className="w-full max-w-7xl flex justify-between items-start mb-8 md:mb-12 text-white relative z-10 pt-4">
           <div className="bg-blue-900 border-4 border-yellow-500 p-4 rounded-xl w-32 md:w-48 text-center shadow-2xl relative mt-4">
             <h3 className="text-sm md:text-lg font-bold mb-1 text-blue-200 tracking-widest">TEAM 1</h3>
@@ -203,15 +1145,15 @@ export default function Home() {
           </div>
           <div className="flex flex-col items-center">
             <div className="relative mb-4">
-                <div className="absolute -inset-4 bg-yellow-500/20 blur-xl rounded-full"></div>
-                <div className="relative bg-black border-[3px] border-yellow-600 px-8 md:px-12 py-2 rounded-lg shadow-2xl">
-                    <span className="text-4xl md:text-6xl font-mono text-yellow-500 font-bold tracking-widest drop-shadow-[0_0_10px_rgba(234,179,8,0.5)]">{gameState.roundPoints}</span>
-                </div>
+              <div className="absolute -inset-4 bg-yellow-500/20 blur-xl rounded-full"></div>
+              <div className="relative bg-black border-[3px] border-yellow-600 px-8 md:px-12 py-2 rounded-lg shadow-2xl">
+                <span className="text-4xl md:text-6xl font-mono text-yellow-500 font-bold tracking-widest drop-shadow-[0_0_10px_rgba(234,179,8,0.5)]">{gameState.roundPoints}</span>
+              </div>
             </div>
             <div className="h-12 flex items-center justify-center gap-2">
-               {gameState.strikes >= 1 && <span className="text-red-600 font-black text-4xl drop-shadow-[0_2px_2px_rgba(0,0,0,0.8)]">X</span>}
-               {gameState.strikes >= 2 && <span className="text-red-600 font-black text-4xl drop-shadow-[0_2px_2px_rgba(0,0,0,0.8)]">X</span>}
-               {gameState.strikes >= 3 && <span className="text-red-600 font-black text-4xl drop-shadow-[0_2px_2px_rgba(0,0,0,0.8)]">X</span>}
+              {gameState.strikes >= 1 && <span className="text-red-600 font-black text-4xl drop-shadow-[0_2px_2px_rgba(0,0,0,0.8)]">X</span>}
+              {gameState.strikes >= 2 && <span className="text-red-600 font-black text-4xl drop-shadow-[0_2px_2px_rgba(0,0,0,0.8)]">X</span>}
+              {gameState.strikes >= 3 && <span className="text-red-600 font-black text-4xl drop-shadow-[0_2px_2px_rgba(0,0,0,0.8)]">X</span>}
             </div>
           </div>
           <div className="bg-blue-900 border-4 border-yellow-500 p-4 rounded-xl w-32 md:w-48 text-center shadow-2xl mt-4">
@@ -219,73 +1161,544 @@ export default function Home() {
             <span className="text-4xl md:text-6xl font-black block leading-none">{gameState.scores.team2}</span>
           </div>
         </div>
+
         <div className="w-full max-w-6xl flex-grow flex flex-col items-center relative z-10">
-          <div className="bg-blue-800/80 backdrop-blur-sm border-2 border-blue-400/30 p-4 rounded-xl mb-8 text-center max-w-4xl shadow-lg w-full">
-             <h2 className="text-xl md:text-2xl text-white font-semibold leading-relaxed">{currentRound.question}</h2>
+          <div className="bg-blue-800/80 backdrop-blur-sm border-2 border-blue-400/30 p-4 rounded-xl mb-4 text-center max-w-4xl shadow-lg w-full">
+            <h2 className="text-xl md:text-2xl text-white font-semibold leading-relaxed">{currentRound.question}</h2>
           </div>
+
+          {/* Session Code Display - Centered Below Question */}
+          <div className="bg-blue-900 border-2 border-yellow-500 px-4 py-2 rounded-lg mb-6">
+            <span className="text-yellow-400 font-mono font-bold text-lg">CODE: {sessionCode}</span>
+          </div>
+
           <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-4">
-             <div className="flex flex-col gap-3">
-                {[0, 1, 2, 3].map(i => (<AnswerSlot key={i} index={i} answer={currentRound.answers[i]} multiplier={currentRound.multiplier} />))}
-             </div>
-             <div className="flex flex-col gap-3">
-                {[4, 5, 6, 7].map(i => (<AnswerSlot key={i} index={i} answer={currentRound.answers[i]} multiplier={currentRound.multiplier} />))}
-             </div>
+            <div className="flex flex-col gap-3">
+              {[0, 1, 2, 3].map(i => (<AnswerSlot key={i} index={i} answer={currentRound.answers[i]} multiplier={currentRound.multiplier} />))}
+            </div>
+            <div className="flex flex-col gap-3">
+              {[4, 5, 6, 7].map(i => (<AnswerSlot key={i} index={i} answer={currentRound.answers[i]} multiplier={currentRound.multiplier} />))}
+            </div>
           </div>
         </div>
       </div>
     );
   }
 
-  // --- HOST VIEW ---
+  // Host View
   return (
-    <div className="min-h-screen bg-gray-50 p-6 font-sans text-gray-900">
-      <div className="max-w-4xl mx-auto space-y-6">
-        <div className="bg-white p-4 rounded-lg shadow-md border-b-4 border-gray-200 flex justify-between items-center">
-          <h2 className="text-xl font-bold flex items-center gap-2 text-blue-900"><Settings className="text-blue-600" /> Host Control</h2>
-          <div className="space-x-3">
-            <button onClick={() => resetGame()} className="px-4 py-1 text-sm bg-red-100 text-red-700 rounded hover:bg-red-200 font-semibold">Reset Game</button>
-            <span className="text-sm font-mono bg-blue-100 text-blue-800 px-3 py-1 rounded font-bold">Round {gameState.currentRoundIndex + 1} / 3</span>
+    <div className="min-h-screen bg-gray-50 p-4 md:p-6 font-sans text-gray-900">
+      <div className="max-w-6xl mx-auto space-y-6">
+        {/* Header */}
+        <div className="bg-white p-6 rounded-xl shadow-lg border-2 border-blue-200">
+          <div className="flex items-center justify-between mb-6">
+            <h2 className="text-2xl md:text-3xl font-bold flex items-center gap-3 text-blue-900">
+              <Settings className="text-blue-600" size={32} /> Host Control
+            </h2>
+            <span className="text-lg font-mono bg-blue-100 text-blue-800 px-4 py-2 rounded-lg font-bold border-2 border-blue-300">
+              Round {gameState.currentRoundIndex + 1} / {editedRounds.length}
+            </span>
+          </div>
+
+          {/* Codes and Actions Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {/* Session Code */}
+            <div className="bg-yellow-50 p-4 rounded-lg border-2 border-yellow-300 text-center">
+              <div className="text-xs text-yellow-700 font-semibold uppercase tracking-wide mb-1">Session Code</div>
+              <div className="font-mono font-bold text-2xl text-yellow-900">{sessionCode}</div>
+            </div>
+
+            {/* Host Code */}
+            <div className="bg-green-50 p-4 rounded-lg border-2 border-green-300 text-center">
+              <div className="text-xs text-green-700 font-semibold uppercase tracking-wide mb-1">Host Code</div>
+              <div className="font-mono font-bold text-lg text-green-900">{hostCode}</div>
+            </div>
+
+            {/* Copy Link Button */}
+            <button
+              onClick={copyJoinLink}
+              className="bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold flex items-center justify-center gap-2 transition-colors shadow-md hover:shadow-lg p-4 w-full h-full min-h-[80px]"
+            >
+              <Copy size={20} />
+              Copy Link
+            </button>
+
+            {/* Reset Game Button */}
+            <button
+              onClick={resetGame}
+              className="bg-red-500 hover:bg-red-600 text-white rounded-lg font-bold transition-colors shadow-md hover:shadow-lg p-4 w-full h-full min-h-[80px]"
+            >
+              Reset Game
+            </button>
           </div>
         </div>
-        <div className="bg-blue-600 text-white p-6 rounded-lg shadow-md">
-           <h3 className="text-2xl font-bold mb-2">Q: {currentRound.question}</h3>
-           <p className="opacity-90 italic">💡 Host Tip: {currentRound.hostTip}</p>
+
+        {/* QR Code */}
+        <div
+          className="bg-white p-6 rounded-xl shadow-lg text-center cursor-pointer hover:shadow-xl transition-all hover:scale-[1.02] border-2 border-blue-200"
+          onClick={() => setQrFullscreen(true)}
+        >
+          <h3 className="text-lg font-bold text-blue-900 mb-3 flex items-center justify-center gap-2">
+            <Monitor size={20} /> Scan to Join
+          </h3>
+          <p className="text-sm text-gray-600 mb-4">Click to enlarge for easy scanning</p>
+          <QRCodeSVG
+            value={`${typeof window !== 'undefined' ? window.location.origin : ''}?code=${sessionCode}`}
+            size={180}
+            level="M"
+            className="mx-auto border-4 border-gray-200 rounded-lg p-2"
+          />
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          <div className="bg-white p-5 rounded-lg shadow-md border border-gray-200">
-            <h3 className="text-gray-400 text-xs font-bold uppercase tracking-wider mb-4">Reveal Answers</h3>
+
+        {/* QR Code Fullscreen Modal */}
+        {qrFullscreen && (
+          <div
+            className="fixed inset-0 z-[9999] bg-white flex flex-col items-center justify-center p-8"
+            onClick={() => setQrFullscreen(false)}
+          >
+            <button
+              onClick={() => setQrFullscreen(false)}
+              className="absolute top-4 right-4 px-4 py-2 bg-red-600 text-white rounded-lg font-bold hover:bg-red-700"
+            >
+              Close
+            </button>
+            <h1 className="text-4xl font-bold text-blue-900 mb-8">Scan to Join Game</h1>
+            <QRCodeSVG
+              value={`${typeof window !== 'undefined' ? window.location.origin : ''}?code=${sessionCode}`}
+              size={400}
+              level="M"
+              className="shadow-2xl"
+            />
+            <div className="mt-8 bg-yellow-100 px-6 py-3 rounded-lg border-2 border-yellow-400">
+              <div className="text-xs text-yellow-700 font-semibold">Session Code</div>
+              <div className="font-mono font-bold text-3xl text-yellow-900">{sessionCode}</div>
+            </div>
+            <p className="mt-4 text-gray-600">Click anywhere to close</p>
+          </div>
+        )}
+
+        {/* Question Editor Toggle */}
+        <div className="bg-white p-6 rounded-xl shadow-lg border-2 border-purple-200">
+          <button
+            onClick={() => editingQuestions ? setEditingQuestions(false) : openQuestionEditor()}
+            className="w-full px-6 py-4 bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-bold flex items-center justify-center gap-2 transition-colors shadow-md hover:shadow-lg text-lg"
+          >
+            {editingQuestions ? <XIcon size={24} /> : <Edit2 size={24} />}
+            {editingQuestions ? 'Close Question Editor' : 'Edit Questions'}
+          </button>
+        </div>
+
+        {/* Question Editor */}
+        {editingQuestions && (
+          <div className="bg-white p-6 rounded-xl shadow-lg border-2 border-purple-300">
+            <div className="flex justify-between items-center mb-6">
+              <h3 className="text-2xl font-bold text-purple-900 flex items-center gap-2">
+                <Edit2 size={28} /> Question Editor
+              </h3>
+              <button
+                onClick={() => {
+                  const newRound: Round = {
+                    title: `Round ${editedRounds.length + 1}`,
+                    question: 'Enter your question here',
+                    multiplier: 1,
+                    hostTip: 'Add a tip for the host',
+                    answers: [
+                      { text: '', points: 0, revealed: false },
+                    ],
+                  };
+                  setEditedRounds([...editedRounds, newRound]);
+                }}
+                className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg font-bold flex items-center gap-2 shadow-md transition"
+              >
+                <Plus size={20} /> Add Round
+              </button>
+            </div>
+            <div className="space-y-6">
+              {editedRounds.map((round, roundIdx) => (
+                <div key={roundIdx} className="border-2 border-purple-200 p-5 rounded-xl bg-purple-50/30">
+                  <div className="flex justify-between items-start mb-4">
+                    <h4 className="font-bold text-xl text-purple-900">Round {roundIdx + 1}</h4>
+                    <div className="flex items-center gap-3">
+                      <label className="text-sm font-semibold text-gray-700">Multiplier:</label>
+                      <select
+                        value={round.multiplier}
+                        onChange={(e) => {
+                          const newRounds = [...editedRounds];
+                          newRounds[roundIdx].multiplier = parseInt(e.target.value);
+                          setEditedRounds(newRounds);
+                        }}
+                        className="px-3 py-2 border-2 border-purple-300 rounded-lg font-bold bg-white"
+                      >
+                        <option value="1">1x</option>
+                        <option value="2">2x</option>
+                        <option value="3">3x</option>
+                      </select>
+                      {editedRounds.length > 1 && (
+                        <button
+                          onClick={() => {
+                            const newRounds = [...editedRounds];
+                            newRounds.splice(roundIdx, 1);
+                            setEditedRounds(newRounds);
+                          }}
+                          className="px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-bold transition"
+                          title="Delete Round"
+                        >
+                          <XIcon size={20} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Host Tip */}
+                  <div className="mb-3">
+                    <label className="text-xs font-semibold text-gray-600 uppercase mb-1 block">Host Tip</label>
+                    <input
+                      type="text"
+                      value={round.hostTip || ''}
+                      onChange={(e) => {
+                        const newRounds = [...editedRounds];
+                        newRounds[roundIdx].hostTip = e.target.value;
+                        setEditedRounds(newRounds);
+                      }}
+                      className="w-full px-3 py-2 border-2 border-gray-300 rounded-lg text-sm italic"
+                      placeholder="Add a helpful tip for the host..."
+                    />
+                  </div>
+                  {/* Question */}
+                  <div className="mb-4">
+                    <label className="text-xs font-semibold text-gray-600 uppercase mb-1 block">Question</label>
+                    <textarea
+                      value={round.question}
+                      onChange={(e) => {
+                        const newRounds = [...editedRounds];
+                        newRounds[roundIdx].question = e.target.value;
+                        setEditedRounds(newRounds);
+                      }}
+                      rows={2}
+                      className="w-full px-4 py-3 border-2 border-purple-300 rounded-lg font-semibold text-lg resize-none"
+                      placeholder="Enter your question here..."
+                    />
+                  </div>
+                  {/* Answers */}
+                  <div className="space-y-2">
+                    <label className="text-xs font-semibold text-gray-600 uppercase mb-2 block">Answers</label>
+                    {round.answers.map((answer, ansIdx) => (
+                      <div key={ansIdx} className="flex gap-2">
+                        <input
+                          type="text"
+                          value={answer.text}
+                          onChange={(e) => {
+                            const newRounds = [...editedRounds];
+                            newRounds[roundIdx].answers[ansIdx].text = e.target.value;
+                            setEditedRounds(newRounds);
+                          }}
+                          className="flex-grow px-4 py-2 border-2 border-gray-300 rounded-lg focus:border-purple-400 focus:ring-2 focus:ring-purple-200"
+                          placeholder={`Answer ${ansIdx + 1}`}
+                        />
+                        <input
+                          type="number"
+                          value={answer.points}
+                          onChange={(e) => {
+                            const newRounds = [...editedRounds];
+                            newRounds[roundIdx].answers[ansIdx].points = parseInt(e.target.value) || 0;
+                            setEditedRounds(newRounds);
+                          }}
+                          className="w-24 px-3 py-2 border-2 border-gray-300 rounded-lg text-center font-mono font-bold focus:border-purple-400 focus:ring-2 focus:ring-purple-200"
+                          placeholder="Pts"
+                          min="0"
+                        />
+                        <button
+                          onClick={() => {
+                            const newRounds = [...editedRounds];
+                            newRounds[roundIdx].answers.splice(ansIdx, 1);
+                            setEditedRounds(newRounds);
+                          }}
+                          className="px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition"
+                          title="Delete Answer"
+                        >
+                          <XIcon size={20} />
+                        </button>
+                      </div>
+                    ))}
+                    {round.answers.length < 8 && (
+                      <button
+                        onClick={() => {
+                          const newRounds = [...editedRounds];
+                          newRounds[roundIdx].answers.push({ text: '', points: 0, revealed: false });
+                          setEditedRounds(newRounds);
+                        }}
+                        className="w-full px-4 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg font-semibold flex items-center justify-center gap-2 transition shadow-md"
+                      >
+                        <Plus size={16} /> Add Answer
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Fast Money Questions Section */}
+            <div className="mt-8 pt-6 border-t-4 border-yellow-400">
+              <div className="flex justify-between items-center mb-6">
+                <h3 className="text-2xl font-bold text-yellow-600 flex items-center gap-2">
+                  <span className="text-3xl">⚡</span> Fast Money Questions
+                </h3>
+              </div>
+              <div className="space-y-6">
+                {editedFastMoneyQuestions.map((fmQuestion, fmIdx) => (
+                  <div key={fmIdx} className="border-2 border-yellow-300 p-5 rounded-xl bg-yellow-50/30">
+                    <div className="flex justify-between items-start mb-4">
+                      <h4 className="font-bold text-xl text-yellow-700">Question {fmIdx + 1}</h4>
+                      {editedFastMoneyQuestions.length > 1 && (
+                        <button
+                          onClick={() => {
+                            const newQuestions = [...editedFastMoneyQuestions];
+                            newQuestions.splice(fmIdx, 1);
+                            setEditedFastMoneyQuestions(newQuestions);
+                          }}
+                          className="px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg font-bold transition"
+                          title="Delete Question"
+                        >
+                          <XIcon size={20} />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Question Text */}
+                    <div className="mb-4">
+                      <label className="text-xs font-semibold text-gray-600 uppercase mb-1 block">Question</label>
+                      <textarea
+                        value={fmQuestion.question}
+                        onChange={(e) => {
+                          const newQuestions = [...editedFastMoneyQuestions];
+                          newQuestions[fmIdx].question = e.target.value;
+                          setEditedFastMoneyQuestions(newQuestions);
+                        }}
+                        rows={2}
+                        className="w-full px-4 py-3 border-2 border-yellow-300 rounded-lg font-semibold text-lg resize-none"
+                        placeholder="Enter your Fast Money question here..."
+                      />
+                    </div>
+
+                    {/* Answers */}
+                    <div className="space-y-2">
+                      <label className="text-xs font-semibold text-gray-600 uppercase mb-2 block">Answers (Top to Bottom)</label>
+                      {fmQuestion.answers.map((answer, ansIdx) => (
+                        <div key={ansIdx} className="flex gap-2 items-center">
+                          <span className="text-sm font-bold text-gray-500 w-6">#{ansIdx + 1}</span>
+                          <input
+                            type="text"
+                            value={answer.text}
+                            onChange={(e) => {
+                              const newQuestions = [...editedFastMoneyQuestions];
+                              newQuestions[fmIdx].answers[ansIdx].text = e.target.value;
+                              setEditedFastMoneyQuestions(newQuestions);
+                            }}
+                            className="flex-grow px-4 py-2 border-2 border-gray-300 rounded-lg focus:border-yellow-400 focus:ring-2 focus:ring-yellow-200"
+                            placeholder={`Answer ${ansIdx + 1}`}
+                          />
+                          <input
+                            type="number"
+                            value={answer.score}
+                            onChange={(e) => {
+                              const newQuestions = [...editedFastMoneyQuestions];
+                              newQuestions[fmIdx].answers[ansIdx].score = parseInt(e.target.value) || 0;
+                              setEditedFastMoneyQuestions(newQuestions);
+                            }}
+                            className="w-24 px-3 py-2 border-2 border-gray-300 rounded-lg text-center font-mono font-bold focus:border-yellow-400 focus:ring-2 focus:ring-yellow-200"
+                            placeholder="Score"
+                            min="0"
+                          />
+                          {fmQuestion.answers.length > 1 && (
+                            <button
+                              onClick={() => {
+                                const newQuestions = [...editedFastMoneyQuestions];
+                                newQuestions[fmIdx].answers.splice(ansIdx, 1);
+                                setEditedFastMoneyQuestions(newQuestions);
+                              }}
+                              className="px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition"
+                              title="Delete Answer"
+                            >
+                              <XIcon size={20} />
+                            </button>
+                          )}
+                        </div>
+                      ))}
+                      {fmQuestion.answers.length < 8 && (
+                        <button
+                          onClick={() => {
+                            const newQuestions = [...editedFastMoneyQuestions];
+                            newQuestions[fmIdx].answers.push({ text: '', score: 0 });
+                            setEditedFastMoneyQuestions(newQuestions);
+                          }}
+                          className="w-full px-4 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg font-semibold flex items-center justify-center gap-2 transition shadow-md"
+                        >
+                          <Plus size={16} /> Add Answer
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+                <button
+                  onClick={() => {
+                    const newQuestion: FastMoneyQuestion = {
+                      question: 'Enter your Fast Money question here',
+                      answers: [
+                        { text: '', score: 0 },
+                      ],
+                    };
+                    setEditedFastMoneyQuestions([...editedFastMoneyQuestions, newQuestion]);
+                  }}
+                  className="w-full px-4 py-3 bg-yellow-500 hover:bg-yellow-600 text-white rounded-lg font-bold flex items-center justify-center gap-2 shadow-md transition"
+                >
+                  <Plus size={20} /> Add Fast Money Question
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-6 pt-6 border-t-2 border-purple-200">
+              <button
+                onClick={saveQuestions}
+                className="w-full px-6 py-4 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white rounded-xl font-bold flex items-center justify-center gap-2 shadow-lg hover:shadow-xl transition text-lg"
+              >
+                <Save size={24} />
+                Save All Questions
+              </button>
+              <p className="text-sm text-gray-600 text-center mt-3">
+                Changes will be saved to the session and persist until the game is reset
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Current Round Info */}
+        <div className="bg-gradient-to-br from-blue-600 to-blue-700 text-white p-6 rounded-xl shadow-xl border-2 border-blue-500">
+          <div className="flex justify-between items-start mb-4">
+            <div className="flex-1">
+              <div className="text-sm font-semibold text-blue-200 mb-2 uppercase tracking-wide">Current Question</div>
+              <h3 className="text-xl md:text-2xl font-bold leading-relaxed">{currentRound.question}</h3>
+            </div>
+            <div className="bg-yellow-400 text-blue-900 px-4 py-2 rounded-lg ml-4 flex-shrink-0">
+              <span className="font-black text-xl">{currentRound.multiplier}x</span>
+            </div>
+          </div>
+          <div className="bg-blue-800/50 p-3 rounded-lg border border-blue-500/50">
+            <p className="text-sm flex items-start gap-2">
+              <span className="text-yellow-400 text-lg">💡</span>
+              <span className="flex-1"><strong>Host Tip:</strong> {currentRound.hostTip}</span>
+            </p>
+          </div>
+        </div>
+
+        {/* Game Controls */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Answers */}
+          <div className="bg-white p-6 rounded-xl shadow-lg border-2 border-gray-200">
+            <h3 className="text-blue-900 text-sm font-bold uppercase tracking-wider mb-4 flex items-center gap-2">
+              <span className="bg-blue-100 p-2 rounded">📝</span> Reveal Answers
+            </h3>
             <div className="space-y-2">
               {currentRound.answers.map((ans: any, idx: number) => (
-                <button key={idx} onClick={() => performAction('REVEAL_ANSWER', { index: idx })} disabled={ans.revealed} className={`w-full flex justify-between px-4 py-3 rounded border-2 text-left transition-all ${ans.revealed ? 'bg-green-50 border-green-200 text-green-700 opacity-60' : 'bg-white hover:bg-blue-50 border-gray-200 hover:border-blue-300'}`}>
+                <button
+                  key={idx}
+                  onClick={() => performAction('REVEAL_ANSWER', { index: idx })}
+                  disabled={ans.revealed}
+                  className={`w-full flex justify-between px-4 py-3 rounded-lg border-2 text-left transition-all ${
+                    ans.revealed
+                      ? 'bg-green-50 border-green-300 text-green-700 opacity-60 cursor-not-allowed'
+                      : 'bg-white hover:bg-blue-50 border-gray-300 hover:border-blue-400 hover:shadow-md'
+                  }`}
+                >
                   <span className="font-bold">#{idx + 1} {ans.text}</span>
-                  <span className="font-mono font-bold bg-gray-100 px-2 rounded">{ans.points * currentRound.multiplier}</span>
+                  <span className="font-mono font-bold bg-blue-100 text-blue-900 px-3 py-1 rounded">{ans.points * currentRound.multiplier}</span>
                 </button>
               ))}
             </div>
           </div>
+
+          {/* Controls */}
           <div className="space-y-6">
-            <div className="bg-white p-5 rounded-lg shadow-md border border-gray-200">
-              <h3 className="text-gray-400 text-xs font-bold uppercase tracking-wider mb-4">Strikes</h3>
+            {/* Strikes */}
+            <div className="bg-white p-6 rounded-xl shadow-lg border-2 border-gray-200">
+              <h3 className="text-red-700 text-sm font-bold uppercase tracking-wider mb-4 flex items-center gap-2">
+                <span className="bg-red-100 p-2 rounded">❌</span> Strikes
+              </h3>
               <div className="flex justify-center mb-6 h-16 items-center">
-                 <div className="text-6xl font-black text-red-500 tracking-[1rem]">{gameState.strikes > 0 ? 'X'.repeat(gameState.strikes) : <span className="text-gray-300 text-2xl tracking-normal font-normal">No Strikes</span>}</div>
+                <div className="text-6xl font-black text-red-500 tracking-[1rem]">
+                  {gameState.strikes > 0 ? 'X'.repeat(gameState.strikes) : <span className="text-gray-300 text-2xl tracking-normal font-normal">No Strikes</span>}
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <button onClick={() => performAction('ADD_STRIKE')} className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded shadow-sm transition transform active:scale-95">STRIKE (+1)</button>
-                <button onClick={() => performAction('CLEAR_STRIKES')} className="bg-gray-100 hover:bg-gray-200 text-gray-600 font-bold py-3 rounded shadow-sm">Clear</button>
+                <button
+                  onClick={() => performAction('ADD_STRIKE')}
+                  className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg shadow-md transition transform active:scale-95 hover:shadow-lg"
+                >
+                  STRIKE (+1)
+                </button>
+                <button
+                  onClick={() => performAction('CLEAR_STRIKES')}
+                  className="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-3 rounded-lg shadow-md transition hover:shadow-lg"
+                >
+                  Clear
+                </button>
               </div>
             </div>
-            <div className="bg-white p-5 rounded-lg shadow-md border border-gray-200">
-              <h3 className="text-gray-400 text-xs font-bold uppercase tracking-wider mb-4">Award Points (Includes Steal)</h3>
-              <div className="bg-yellow-50 border border-yellow-200 p-3 rounded mb-4 text-sm text-yellow-800"><strong>Steal Logic:</strong> If a team steals, 1) Click the answer they guessed to add it to the pot, 2) Click "Award Team".</div>
+
+            {/* Award Points */}
+            <div className="bg-white p-6 rounded-xl shadow-lg border-2 border-gray-200">
+              <h3 className="text-yellow-700 text-sm font-bold uppercase tracking-wider mb-4 flex items-center gap-2">
+                <span className="bg-yellow-100 p-2 rounded">🏆</span> Award Points
+              </h3>
+              <div className="bg-yellow-50 border-2 border-yellow-300 p-4 rounded-lg mb-4 text-sm text-yellow-900">
+                <strong>💡 Steal Logic:</strong> If a team steals, 1) Click the answer they guessed to add it to the pot, 2) Click "Award Team".
+              </div>
               <div className="grid grid-cols-2 gap-3 mb-4">
-                <button onClick={() => performAction('AWARD_ROUND', { team: 'team1' })} className="bg-blue-100 hover:bg-blue-200 text-blue-800 py-3 rounded font-bold border border-blue-200">Award Team 1</button>
-                <button onClick={() => performAction('AWARD_ROUND', { team: 'team2' })} className="bg-blue-100 hover:bg-blue-200 text-blue-800 py-3 rounded font-bold border border-blue-200">Award Team 2</button>
+                <button
+                  onClick={() => performAction('AWARD_ROUND', { team: 'team1' })}
+                  className="bg-blue-500 hover:bg-blue-600 text-white py-3 rounded-lg font-bold border-2 border-blue-400 shadow-md transition hover:shadow-lg"
+                >
+                  Award Team 1
+                </button>
+                <button
+                  onClick={() => performAction('AWARD_ROUND', { team: 'team2' })}
+                  className="bg-blue-500 hover:bg-blue-600 text-white py-3 rounded-lg font-bold border-2 border-blue-400 shadow-md transition hover:shadow-lg"
+                >
+                  Award Team 2
+                </button>
               </div>
-              <button onClick={() => performAction('NEXT_ROUND')} className="w-full bg-yellow-400 hover:bg-yellow-500 text-yellow-900 font-bold py-4 rounded shadow-md flex items-center justify-center gap-2 transition transform active:scale-95">Start Next Round <Monitor size={20} /></button>
+              <button
+                onClick={() => performAction('NEXT_ROUND')}
+                className="w-full bg-gradient-to-r from-yellow-400 to-yellow-500 hover:from-yellow-500 hover:to-yellow-600 text-yellow-900 font-bold py-4 rounded-lg shadow-lg flex items-center justify-center gap-2 transition transform active:scale-95 hover:shadow-xl text-lg"
+              >
+                {gameState.currentRoundIndex < editedRounds.length - 1 ? 'Start Next Round' : 'End Game'} <Play size={20} />
+              </button>
             </div>
+
+            {/* Fast Money Option */}
+            {showFastMoneyOption && gameState.currentRoundIndex === editedRounds.length - 1 && !gameState.winner && (
+              <div className="bg-gradient-to-br from-purple-600 to-purple-700 p-6 rounded-xl shadow-xl text-white border-2 border-purple-500">
+                <h3 className="text-xl font-bold mb-3 flex items-center gap-2">
+                  <span className="text-2xl">⚡</span> Optional: Fast Money Round
+                </h3>
+                <p className="text-sm mb-4 opacity-90">After completing all 3 rounds, you can optionally play Fast Money!</p>
+                <button
+                  onClick={async () => {
+                    // Fetch Fast Money questions from session
+                    const fastMoneyRef = ref(db, `sessions/${sessionCode}/fastMoneyQuestions`);
+                    const snapshot = await get(fastMoneyRef);
+                    const fastMoneyQuestions = snapshot.exists() ? snapshot.val() : FAST_MONEY_QUESTIONS;
+                    performAction('START_FAST_MONEY', { fastMoneyQuestions });
+                  }}
+                  className="w-full bg-yellow-400 hover:bg-yellow-500 text-purple-900 font-bold py-3 rounded-lg shadow-lg flex items-center justify-center gap-2 transition hover:shadow-xl"
+                >
+                  <Play size={20} />
+                  Start Fast Money
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
     </div>
-    );
-  }
+  );
+}
