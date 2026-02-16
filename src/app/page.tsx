@@ -1,22 +1,85 @@
 "use client";
 import { useState, useEffect } from 'react';
-import { Settings, Monitor, Trophy, Copy, X as XIcon, Play, Lightbulb, Eye } from 'lucide-react';
+import { Settings, Monitor, Trophy, Copy, X as XIcon, Play, Music, Lightbulb, Eye } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { db } from '@/lib/firebase';
 import { ref, onValue, set, update, get } from 'firebase/database';
 import { INITIAL_ROUNDS, type Round } from '@/lib/gameData';
 import { nanoid } from 'nanoid';
 
-const StrikeOverlay = ({ count, lastStrikeTime }: { count: number, lastStrikeTime: number }) => {
+class AudioManager {
+  private sounds: Map<string, HTMLAudioElement> = new Map();
+  private themeMusic: HTMLAudioElement | null = null;
+  private muted: boolean = false;
+
+  constructor() {
+    if (typeof window !== 'undefined') {
+      this.sounds.set('strike', new Audio('/sounds/strike.mp3'));
+      this.sounds.set('reveal', new Audio('/sounds/reveal.mp3'));
+      this.sounds.set('win', new Audio('/sounds/win.mp3'));
+
+      this.themeMusic = new Audio('/sounds/theme.mp3');
+      this.themeMusic.loop = false;
+      this.themeMusic.volume = 0.3;
+    }
+  }
+
+  play(sound: string, isHost: boolean = false) {
+    if (this.muted || isHost) return;
+    const audio = this.sounds.get(sound);
+    if (audio) {
+      audio.currentTime = 0;
+      audio.play().catch(() => {});
+    }
+  }
+
+  startTheme(onEnd?: () => void) {
+    if (this.muted || !this.themeMusic) return;
+
+    if (onEnd) {
+      this.themeMusic.onended = onEnd;
+    }
+
+    this.themeMusic.play().catch(() => {});
+  }
+
+  isThemePlaying() {
+    return this.themeMusic ? !this.themeMusic.paused : false;
+  }
+
+  stopTheme() {
+    if (this.themeMusic) {
+      this.themeMusic.pause();
+      this.themeMusic.currentTime = 0;
+    }
+  }
+
+  toggleMute() {
+    this.muted = !this.muted;
+    if (this.muted) {
+      this.stopTheme();
+    }
+    return this.muted;
+  }
+
+  getMuted() {
+    return this.muted;
+  }
+}
+
+const audioManager = new AudioManager();
+
+const StrikeOverlay = ({ count, lastStrikeTime, isHost }: { count: number, lastStrikeTime: number, isHost?: boolean }) => {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
     const isRecent = Date.now() - lastStrikeTime < 2000;
     if (count > 0 && isRecent) {
       setVisible(true);
+      audioManager.play('strike', isHost);
       const timer = setTimeout(() => setVisible(false), 3000);
       return () => clearTimeout(timer);
     }
-  }, [count, lastStrikeTime]);
+  }, [count, lastStrikeTime, isHost]);
 
   if (!visible) return null;
   return (
@@ -65,6 +128,8 @@ export default function Home() {
   const [hostCode, setHostCode] = useState('');
   const [isHost, setIsHost] = useState(false);
   const [rounds, setRounds] = useState<Round[]>([]);
+  const [muted, setMuted] = useState(false);
+  const [themeIsPlaying, setThemeIsPlaying] = useState(false);
 
   // ?code= links open straight onto the board
   useEffect(() => {
@@ -174,12 +239,18 @@ export default function Home() {
     const roundsRef = ref(db, `sessions/${sessionCode}/rounds`);
 
     let previousGameState: any = null;
+    let previousRounds: any = null;
 
     const unsubGame = onValue(gameRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
         if (data.winner && !previousGameState?.winner && view === 'board') {
           confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
+          audioManager.startTheme();
+        }
+
+        if (previousGameState && data.currentRoundIndex > previousGameState.currentRoundIndex && !isHost && view === 'board') {
+          audioManager.play('win', isHost);
         }
 
         previousGameState = data;
@@ -190,6 +261,20 @@ export default function Home() {
     const unsubRounds = onValue(roundsRef, (snapshot) => {
       const data = snapshot.val();
       if (data) {
+        if (previousRounds && previousRounds.length > 0 && !isHost && view === 'board') {
+          const currentRoundIndex = previousGameState?.currentRoundIndex || 0;
+          const prevRound = previousRounds[currentRoundIndex];
+          const newRound = data[currentRoundIndex];
+          if (prevRound && newRound) {
+            const newlyRevealed = newRound.answers.some((ans: any, idx: number) =>
+              ans.revealed && !prevRound.answers[idx]?.revealed
+            );
+            if (newlyRevealed) {
+              audioManager.play('reveal', isHost);
+            }
+          }
+        }
+        previousRounds = data;
         setRounds(data);
       }
     });
@@ -278,10 +363,43 @@ export default function Home() {
     alert('Join link copied to clipboard!');
   };
 
+  const toggleMute = () => {
+    const newMuted = audioManager.toggleMute();
+    setMuted(newMuted);
+  };
+
+  useEffect(() => {
+    if (view !== 'landing') {
+      audioManager.stopTheme();
+    }
+  }, [view]);
+
+  const playThemeMusic = () => {
+    if (audioManager.isThemePlaying()) return;
+
+    setThemeIsPlaying(true);
+    audioManager.startTheme(() => {
+      setThemeIsPlaying(false);
+    });
+  };
+
   // Landing Page
   if (view === 'landing') {
     return (
       <div className="min-h-screen bg-blue-950 flex flex-col items-center justify-center text-white font-sans p-4 relative">
+        <button
+          onClick={playThemeMusic}
+          disabled={themeIsPlaying}
+          className={`absolute top-4 right-4 p-3 rounded-full border-2 transition-all ${
+            themeIsPlaying
+              ? 'bg-blue-800/50 border-blue-700 text-blue-500 cursor-not-allowed opacity-60'
+              : 'bg-yellow-500 border-yellow-400 text-blue-900 hover:bg-yellow-400 hover:scale-110'
+          }`}
+          title={themeIsPlaying ? 'Theme music playing...' : 'Play theme music'}
+        >
+          <Music size={24} className={themeIsPlaying ? 'animate-pulse' : ''} />
+        </button>
+
         <h1 className="text-4xl md:text-6xl font-extrabold text-yellow-400 mb-8 drop-shadow-md text-center">FAMILY FEUD</h1>
 
         <div className="bg-blue-900 p-6 md:p-8 rounded-xl shadow-2xl border-4 border-yellow-500 max-w-md w-full space-y-6">
@@ -362,7 +480,19 @@ export default function Home() {
 
     return (
       <div className="min-h-screen bg-blue-950 p-4 md:p-6 flex flex-col items-center font-sans overflow-hidden bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-blue-900 via-blue-950 to-black relative">
-        <StrikeOverlay count={gameState.strikes} lastStrikeTime={gameState.lastStrikeTime} />
+        <StrikeOverlay count={gameState.strikes} lastStrikeTime={gameState.lastStrikeTime} isHost={isHost} />
+
+        <button
+          onClick={toggleMute}
+          className={`absolute top-4 right-4 z-20 p-3 rounded-full border-2 transition-all ${
+            muted
+              ? 'bg-red-600 border-red-500 hover:bg-red-500'
+              : 'bg-green-600 border-green-500 hover:bg-green-500'
+          }`}
+          title={muted ? 'Unmute audio' : 'Mute audio'}
+        >
+          <Music size={24} className={muted ? 'opacity-50' : 'opacity-100'} />
+        </button>
 
         <div className="w-full max-w-7xl flex justify-between items-start mb-8 md:mb-12 text-white relative z-10 pt-4">
           <div className="bg-blue-900 border-4 border-yellow-500 p-4 rounded-xl w-32 md:w-48 text-center shadow-2xl relative mt-4">
