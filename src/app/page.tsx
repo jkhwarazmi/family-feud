@@ -468,10 +468,6 @@ export default function Home() {
         }
         break;
 
-      case 'UPDATE_MULTIPLIER':
-        updates[`sessions/${sessionCode}/rounds/${payload.roundIndex}/multiplier`] = payload.multiplier;
-        break;
-
       case 'START_FAST_MONEY':
         // team that won the main game goes first
         const winningTeam = gameState.scores.team1 > gameState.scores.team2 ? 'team1' : 'team2';
@@ -536,15 +532,6 @@ export default function Home() {
           if (payload.index < teamData.questions.length - 1) {
             updates[`sessions/${sessionCode}/gameState/fastMoney/currentQuestionIndex`] = payload.index + 1;
           }
-        }
-        break;
-
-      case 'FAST_MONEY_NEXT':
-        const currentTeamFM = gameState.fastMoney.currentTeam;
-        const teamDataFM = gameState.fastMoney[currentTeamFM];
-
-        if (gameState.fastMoney.currentQuestionIndex < teamDataFM.questions.length - 1) {
-          updates[`sessions/${sessionCode}/gameState/fastMoney/currentQuestionIndex`] = gameState.fastMoney.currentQuestionIndex + 1;
         }
         break;
 
