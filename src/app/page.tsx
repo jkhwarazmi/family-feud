@@ -533,6 +533,9 @@ export default function Home() {
           updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${payload.index}/playerAnswer`] = payload.answer || 'No Answer';
           updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${payload.index}/playerPoints`] = payload.points || 0;
           updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/totalPoints`] = teamData.totalPoints + (payload.points || 0);
+          if (payload.index < teamData.questions.length - 1) {
+            updates[`sessions/${sessionCode}/gameState/fastMoney/currentQuestionIndex`] = payload.index + 1;
+          }
         }
         break;
 
@@ -868,7 +871,7 @@ export default function Home() {
                   <p className="text-2xl font-bold text-blue-900">{currentQ.question}</p>
                 </div>
 
-                {!currentQ.revealed ? (
+                {!currentQ.revealed && (
                   <div className="space-y-4">
                     <p className="text-sm font-semibold text-gray-700 mb-2">Select the answer the player gave:</p>
                     {currentTeam === losingTeam && firstTeamAnswer && (
@@ -916,16 +919,6 @@ export default function Home() {
                         No Answer / Pass (0 pts)
                       </button>
                     </div>
-                  </div>
-                ) : (
-                  <div className="space-y-3">
-                    <button
-                      onClick={() => performAction('FAST_MONEY_NEXT')}
-                      disabled={fastMoney.currentQuestionIndex >= currentTeamData.questions.length - 1}
-                      className="w-full bg-purple-600 hover:bg-purple-700 text-white font-bold py-4 rounded-lg shadow-lg transition disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      Next Question →
-                    </button>
                   </div>
                 )}
               </div>
