@@ -1063,20 +1063,32 @@ export default function Home() {
 
         {!bothTeamsComplete && (
           <div className="w-full max-w-5xl mx-auto space-y-3">
-            {currentTeamData.questions.map((q: any, idx: number) => (
+            {currentTeamData.questions.map((q: any, idx: number) => {
+              const isActive = idx === fastMoney.currentQuestionIndex && !q.revealed;
+              const isFuture = idx > fastMoney.currentQuestionIndex && !q.revealed;
+              const blurQuestion = q.timedOut === true;
+              return (
               <div
                 key={idx}
-                className={`transition-all duration-500 ${
-                  q.revealed ? 'opacity-100 scale-100' : 'opacity-50 scale-95'
-                }`}
+                className={`transition-all duration-500 ${isFuture ? 'opacity-50 scale-95' : 'opacity-100 scale-100'}`}
               >
-                <div className="bg-gradient-to-r from-purple-700 to-purple-800 p-4 rounded-xl border-2 border-purple-500 shadow-xl">
+                <div className={`bg-gradient-to-r from-purple-700 to-purple-800 rounded-xl border-2 shadow-xl transition-all duration-300 ${
+                  isActive ? 'p-5 border-yellow-400 shadow-yellow-400/30' : 'p-4 border-purple-500'
+                }`}>
                   <div className="flex items-center justify-between gap-4">
                     <div className="flex items-center gap-3 flex-1">
-                      <span className="bg-purple-900 text-yellow-400 font-black text-xl w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0">
+                      <span className={`font-black flex items-center justify-center flex-shrink-0 rounded-full transition-all duration-300 ${
+                        isActive
+                          ? 'bg-yellow-400 text-purple-900 text-2xl w-11 h-11'
+                          : 'bg-purple-900 text-yellow-400 text-xl w-9 h-9'
+                      }`}>
                         {idx + 1}
                       </span>
-                      <span className="text-lg md:text-xl font-bold">{q.question}</span>
+                      <span className={`font-bold transition-all duration-300 ${
+                        isActive ? 'text-2xl md:text-3xl' : 'text-lg md:text-xl'
+                      } ${(isFuture || blurQuestion) ? 'blur-md select-none' : ''}`}>
+                        {q.question}
+                      </span>
                     </div>
                     {q.revealed && (
                       <div className="flex items-center gap-3">
@@ -1093,7 +1105,8 @@ export default function Home() {
                   </div>
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
 
