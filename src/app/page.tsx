@@ -479,6 +479,17 @@ export default function Home() {
 
         const sessionFastMoneyQuestions = payload.fastMoneyQuestions || FAST_MONEY_QUESTIONS;
 
+        const shuffleFMQuestions = (qs: any[]) => {
+          const arr = [...qs];
+          for (let i = arr.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [arr[i], arr[j]] = [arr[j], arr[i]];
+          }
+          return arr;
+        };
+        const team1Questions = shuffleFMQuestions(sessionFastMoneyQuestions);
+        const team2Questions = shuffleFMQuestions(sessionFastMoneyQuestions);
+
         updates[`sessions/${sessionCode}/gameState/fastMoneyMode`] = true;
         updates[`sessions/${sessionCode}/gameState/fastMoney`] = {
           currentTeam: winningTeam,
@@ -490,7 +501,7 @@ export default function Home() {
           team1: {
             totalPoints: 0,
             completed: false,
-            questions: sessionFastMoneyQuestions.map((q: any) => ({
+            questions: team1Questions.map((q: any) => ({
               ...q,
               playerAnswer: '',
               playerPoints: 0,
@@ -500,7 +511,7 @@ export default function Home() {
           team2: {
             totalPoints: 0,
             completed: false,
-            questions: sessionFastMoneyQuestions.map((q: any) => ({
+            questions: team2Questions.map((q: any) => ({
               ...q,
               playerAnswer: '',
               playerPoints: 0,
@@ -736,7 +747,7 @@ export default function Home() {
     const winningTeam = fastMoney.winningTeam;
     const losingTeam = fastMoney.losingTeam;
     const firstTeamAnswer = currentTeam === losingTeam
-      ? fastMoney[winningTeam].questions[fastMoney.currentQuestionIndex]?.playerAnswer
+      ? fastMoney[winningTeam].questions.find((q: any) => q.question === currentQ.question)?.playerAnswer
       : null;
 
     // Host View
@@ -1093,12 +1104,20 @@ export default function Home() {
           </div>
         )}
 
-        {bothTeamsComplete && (
+        {bothTeamsComplete && (() => {
+          // questions are shuffled per team, so line rows up by question
+          const winningQs: any[] = fastMoney[winningTeam].questions;
+          const losingQs: any[] = winningQs.map((wq: any) =>
+            fastMoney[losingTeam].questions.find((lq: any) => lq.question === wq.question)
+          ).filter(Boolean);
+          const team1DisplayQs = winningTeam === 'team1' ? winningQs : losingQs;
+          const team2DisplayQs = winningTeam === 'team2' ? winningQs : losingQs;
+          return (
           <div className="w-full max-w-6xl mx-auto">
             <div className="grid grid-cols-2 gap-6">
               <div className="space-y-2">
                 <h3 className="text-2xl font-black text-center mb-3 text-blue-300">TEAM 1</h3>
-                {fastMoney.team1.questions.map((q: any, idx: number) => (
+                {team1DisplayQs.map((q: any, idx: number) => (
                   <div key={idx} className="bg-blue-900/50 p-3 rounded-lg border border-blue-700">
                     <div className="flex justify-between items-center">
                       <div className="flex-1">
@@ -1120,7 +1139,7 @@ export default function Home() {
 
               <div className="space-y-2">
                 <h3 className="text-2xl font-black text-center mb-3 text-red-300">TEAM 2</h3>
-                {fastMoney.team2.questions.map((q: any, idx: number) => (
+                {team2DisplayQs.map((q: any, idx: number) => (
                   <div key={idx} className="bg-red-900/50 p-3 rounded-lg border border-red-700">
                     <div className="flex justify-between items-center">
                       <div className="flex-1">
@@ -1155,7 +1174,8 @@ export default function Home() {
               </div>
             )}
           </div>
-        )}
+          );
+        })()}
       </div>
     );
   }
