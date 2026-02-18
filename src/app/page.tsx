@@ -97,16 +97,16 @@ const shuffle = <T,>(items: T[]) => {
 };
 
 const StrikeOverlay = ({ count, lastStrikeTime, isHost }: { count: number, lastStrikeTime: number, isHost?: boolean }) => {
-  const [visible, setVisible] = useState(false);
+  // strikes from before the board joined shouldn't flash up
+  const [seenStrikeTime, setSeenStrikeTime] = useState(lastStrikeTime);
+  const visible = count > 0 && lastStrikeTime !== seenStrikeTime;
+
   useEffect(() => {
-    const isRecent = Date.now() - lastStrikeTime < 2000;
-    if (count > 0 && isRecent) {
-      setVisible(true);
-      audioManager.play('strike', isHost);
-      const timer = setTimeout(() => setVisible(false), 3000);
-      return () => clearTimeout(timer);
-    }
-  }, [count, lastStrikeTime, isHost]);
+    if (!visible) return;
+    audioManager.play('strike', isHost);
+    const timer = setTimeout(() => setSeenStrikeTime(lastStrikeTime), 3000);
+    return () => clearTimeout(timer);
+  }, [visible, lastStrikeTime, isHost]);
 
   if (!visible) return null;
   return (
@@ -192,24 +192,25 @@ export default function Home() {
     return fm[fm.currentTeam]?.questions?.every((q) => q.revealed) ?? false;
   })();
 
+  const fmTimerStartedAt = gameState?.fastMoney?.timerStartedAt;
+  const fmTimerDuration = gameState?.fastMoney?.timerDuration;
+  const fmBothCompleted = !!(gameState?.fastMoney?.team1?.completed && gameState?.fastMoney?.team2?.completed);
+
   useEffect(() => {
-    const fm = gameState?.fastMoney;
-    if (!fm?.timerStartedAt || !fm?.timerDuration) return;
-    if (fm.team1?.completed && fm.team2?.completed) return;
-    if (fmAllAnswered) return;
+    if (!fmTimerStartedAt || !fmTimerDuration) return;
+    if (fmBothCompleted || fmAllAnswered) return;
 
     // new turn, so let time-up fire again
     fmTimeUpFiredRef.current = false;
 
     const interval = setInterval(() => {
-      const elapsed = Date.now() - fm.timerStartedAt;
-      const remaining = Math.max(0, fm.timerDuration - elapsed);
+      const remaining = Math.max(0, fmTimerDuration - (Date.now() - fmTimerStartedAt));
       setFmTimeRemaining(remaining);
       if (remaining === 0) clearInterval(interval);
     }, 100);
 
     return () => clearInterval(interval);
-  }, [gameState?.fastMoney?.timerStartedAt, gameState?.fastMoney?.currentTeam, fmAllAnswered]);
+  }, [fmTimerStartedAt, fmTimerDuration, fmBothCompleted, fmAllAnswered]);
 
   // only the host writes time-up, otherwise every screen would
   useEffect(() => {
@@ -597,18 +598,6 @@ export default function Home() {
     window.addEventListener('keydown', handleEsc);
     return () => window.removeEventListener('keydown', handleEsc);
   }, [qrFullscreen]);
-
-  useEffect(() => {
-    if (
-      gameState?.fastMoneyMode &&
-      gameState?.fastMoney?.finalWinner &&
-      view === 'fastmoney' &&
-      !isHost
-    ) {
-      confetti({ particleCount: 200, spread: 90, origin: { y: 0.6 } });
-      audioManager.startTheme();
-    }
-  }, [gameState?.fastMoney?.finalWinner, view, isHost]);
 
   const playThemeMusic = () => {
     if (audioManager.isThemePlaying()) return;
