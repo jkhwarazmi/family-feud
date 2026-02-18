@@ -132,7 +132,6 @@ export default function Home() {
   const [editedRounds, setEditedRounds] = useState<Round[]>([]);
   const [editedFastMoneyQuestions, setEditedFastMoneyQuestions] = useState<FastMoneyQuestion[]>([]);
   const [muted, setMuted] = useState(false);
-  const [showFastMoneyOption, setShowFastMoneyOption] = useState(false);
   const [themeIsPlaying, setThemeIsPlaying] = useState(false);
   const [qrFullscreen, setQrFullscreen] = useState(false);
   const [fmTimeRemaining, setFmTimeRemaining] = useState<number>(45000);
@@ -327,10 +326,6 @@ export default function Home() {
 
         previousGameState = data;
         setGameState(data);
-
-        if (data.currentRoundIndex === 2 && !data.fastMoneyMode) {
-          setShowFastMoneyOption(true);
-        }
       }
     });
 
@@ -380,7 +375,6 @@ export default function Home() {
       [`sessions/${sessionCode}/rounds`]: INITIAL_ROUNDS,
       [`sessions/${sessionCode}/fastMoneyQuestions`]: FAST_MONEY_QUESTIONS,
     });
-    setShowFastMoneyOption(false);
   };
 
   const openQuestionEditor = async () => {
@@ -1717,7 +1711,7 @@ export default function Home() {
               </button>
             </div>
 
-            {showFastMoneyOption && gameState.currentRoundIndex === editedRounds.length - 1 && !gameState.winner && (
+            {gameState.currentRoundIndex === editedRounds.length - 1 && !gameState.winner && (
               <div className="bg-gradient-to-br from-purple-600 to-purple-700 p-6 rounded-xl shadow-xl text-white border-2 border-purple-500">
                 <h3 className="text-xl font-bold mb-3 flex items-center gap-2">
                   <Zap size={24} /> Fast Money
@@ -1725,7 +1719,6 @@ export default function Home() {
                 <p className="text-sm mb-4 opacity-90">Optional final round. Both teams play and the higher total wins.</p>
                 <button
                   onClick={async () => {
-                    // Fetch Fast Money questions from session
                     const fastMoneyRef = ref(db, `sessions/${sessionCode}/fastMoneyQuestions`);
                     const snapshot = await get(fastMoneyRef);
                     const fastMoneyQuestions = snapshot.exists() ? snapshot.val() : FAST_MONEY_QUESTIONS;
