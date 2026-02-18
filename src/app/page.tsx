@@ -2,7 +2,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { Settings, Monitor, Trophy, Copy, Edit2, Save, Plus, X as XIcon, Play, Music, Zap, Lightbulb, Eye } from 'lucide-react';
 import confetti from 'canvas-confetti';
-import { db } from '@/lib/firebase';
+import { auth, db } from '@/lib/firebase';
+import { signInAnonymously } from 'firebase/auth';
 import { ref, onValue, set, update, get } from 'firebase/database';
 import {
   INITIAL_ROUNDS,
@@ -15,7 +16,7 @@ import {
   type GameState,
   type TeamKey,
 } from '@/lib/gameData';
-import { nanoid } from 'nanoid';
+import { customAlphabet } from 'nanoid';
 import { QRCodeSVG } from 'qrcode.react';
 
 class AudioManager {
@@ -79,6 +80,11 @@ class AudioManager {
 }
 
 const audioManager = new AudioManager();
+
+// no 0/O or 1/I, so codes are easy to read off a TV
+const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
+const newSessionCode = customAlphabet(CODE_ALPHABET, 6);
+const newHostKey = customAlphabet(CODE_ALPHABET, 8);
 
 type Action =
   | { type: 'ADD_STRIKE' | 'CLEAR_STRIKES' | 'NEXT_ROUND' | 'FAST_MONEY_SWITCH_TEAM' | 'FAST_MONEY_FINISH' | 'FAST_MONEY_TIME_UP' }
@@ -231,20 +237,28 @@ export default function Home() {
   }, [fmTimeRemaining]);
 
   const createNewSession = async () => {
-    const newCode = nanoid(6).toUpperCase();
-    const newHostCode = `${newCode}-HOST`;
+    const newCode = newSessionCode();
+    const hostKey = newHostKey();
 
-    const sessionRef = ref(db, `sessions/${newCode}`);
-    await set(sessionRef, {
-      gameState: INITIAL_GAME_STATE,
-      rounds: INITIAL_ROUNDS,
-      fastMoneyQuestions: FAST_MONEY_QUESTIONS,
-      hostCode: newHostCode,
-      createdAt: Date.now(),
-    });
+    try {
+      const { user } = await signInAnonymously(auth);
+      // hostKeys can't be read back, the database rules check it when a host claims a session
+      await set(ref(db, `hostKeys/${newCode}`), hostKey);
+      await set(ref(db, `hosts/${newCode}/${user.uid}`), hostKey);
+      await set(ref(db, `sessions/${newCode}`), {
+        gameState: INITIAL_GAME_STATE,
+        rounds: INITIAL_ROUNDS,
+        fastMoneyQuestions: FAST_MONEY_QUESTIONS,
+        createdAt: Date.now(),
+      });
+    } catch (error) {
+      console.error('Error creating session:', error);
+      alert('Could not create a game. Please try again.');
+      return;
+    }
 
     setSessionCode(newCode);
-    setHostCode(newHostCode);
+    setHostCode(`${newCode}-${hostKey}`);
     setIsHost(true);
     setView('host');
   };
@@ -274,30 +288,30 @@ export default function Home() {
       return;
     }
 
-    const code = inputCode.toUpperCase();
-    const parts = code.split('-');
+    const [code, key, ...rest] = inputCode.trim().toUpperCase().split('-');
 
-    if (parts.length !== 2 || parts[1] !== 'HOST') {
+    if (!code || !key || rest.length) {
       alert('Invalid host code format');
       return;
     }
 
-    const sessionRef = ref(db, `sessions/${parts[0]}`);
-    const snapshot = await get(sessionRef);
+    try {
+      const { user } = await signInAnonymously(auth);
+      await set(ref(db, `hosts/${code}/${user.uid}`), key);
+    } catch (error) {
+      console.error('Error logging in as host:', error);
+      alert('Invalid host code');
+      return;
+    }
 
+    const snapshot = await get(ref(db, `sessions/${code}`));
     if (!snapshot.exists()) {
       alert('Session not found');
       return;
     }
 
-    const data = snapshot.val();
-    if (data.hostCode !== code) {
-      alert('Invalid host code');
-      return;
-    }
-
-    setSessionCode(parts[0]);
-    setHostCode(code);
+    setSessionCode(code);
+    setHostCode(`${code}-${key}`);
     setIsHost(true);
     setView('host');
   };

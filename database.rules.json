@@ -1,0 +1,22 @@
+{
+  "rules": {
+    "sessions": {
+      "$code": {
+        ".read": true,
+        ".write": "auth != null && root.child('hosts').child($code).child(auth.uid).exists()"
+      }
+    },
+    "hostKeys": {
+      "$code": {
+        ".write": "auth != null && !data.exists() && newData.isString()"
+      }
+    },
+    "hosts": {
+      "$code": {
+        "$uid": {
+          ".write": "auth != null && auth.uid === $uid && newData.val() === root.child('hostKeys').child($code).val()"
+        }
+      }
+    }
+  }
+}
