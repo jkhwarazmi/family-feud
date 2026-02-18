@@ -17,6 +17,55 @@ export type FastMoneyQuestion = {
   answers: { text: string; score: number }[];
 };
 
+export type TeamKey = 'team1' | 'team2';
+
+export type FastMoneyPlay = FastMoneyQuestion & {
+  playerAnswer: string;
+  playerPoints: number;
+  revealed: boolean;
+  timedOut?: boolean;
+};
+
+export type FastMoneyTeam = {
+  totalPoints: number;
+  completed: boolean;
+  questions: FastMoneyPlay[];
+};
+
+// firebase drops null values, so anything that starts as null comes back undefined
+export type FastMoneyState = {
+  currentTeam: TeamKey;
+  winningTeam: TeamKey;
+  losingTeam: TeamKey;
+  currentQuestionIndex: number;
+  timerStartedAt: number;
+  timerDuration: number;
+  team1: FastMoneyTeam;
+  team2: FastMoneyTeam;
+  finalWinner?: TeamKey | 'tie' | null;
+};
+
+export type GameState = {
+  currentRoundIndex: number;
+  scores: Record<TeamKey, number>;
+  roundPoints: number;
+  strikes: number;
+  lastStrikeTime: number;
+  winner?: string | null;
+  fastMoneyMode: boolean;
+  fastMoney?: FastMoneyState;
+};
+
+export const INITIAL_GAME_STATE: GameState = {
+  currentRoundIndex: 0,
+  scores: { team1: 0, team2: 0 },
+  roundPoints: 0,
+  strikes: 0,
+  lastStrikeTime: 0,
+  winner: null,
+  fastMoneyMode: false,
+};
+
 export const INITIAL_ROUNDS: Round[] = [
   {
     title: "Round 1: Lost & Found",

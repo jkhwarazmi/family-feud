@@ -4,7 +4,17 @@ import { Settings, Monitor, Trophy, Copy, Edit2, Save, Plus, X as XIcon, Play, M
 import confetti from 'canvas-confetti';
 import { db } from '@/lib/firebase';
 import { ref, onValue, set, update, get } from 'firebase/database';
-import { INITIAL_ROUNDS, FAST_MONEY_QUESTIONS, type Round, type FastMoneyQuestion } from '@/lib/gameData';
+import {
+  INITIAL_ROUNDS,
+  FAST_MONEY_QUESTIONS,
+  INITIAL_GAME_STATE,
+  type Answer,
+  type Round,
+  type FastMoneyQuestion,
+  type FastMoneyPlay,
+  type GameState,
+  type TeamKey,
+} from '@/lib/gameData';
 import { nanoid } from 'nanoid';
 import { QRCodeSVG } from 'qrcode.react';
 
@@ -70,6 +80,22 @@ class AudioManager {
 
 const audioManager = new AudioManager();
 
+type Action =
+  | { type: 'ADD_STRIKE' | 'CLEAR_STRIKES' | 'NEXT_ROUND' | 'FAST_MONEY_SWITCH_TEAM' | 'FAST_MONEY_FINISH' | 'FAST_MONEY_TIME_UP' }
+  | { type: 'REVEAL_ANSWER'; index: number }
+  | { type: 'AWARD_ROUND'; team: TeamKey }
+  | { type: 'START_FAST_MONEY'; fastMoneyQuestions: FastMoneyQuestion[] }
+  | { type: 'FAST_MONEY_REVEAL'; index: number; answer: string; points: number };
+
+const shuffle = <T,>(items: T[]) => {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+};
+
 const StrikeOverlay = ({ count, lastStrikeTime, isHost }: { count: number, lastStrikeTime: number, isHost?: boolean }) => {
   const [visible, setVisible] = useState(false);
   useEffect(() => {
@@ -94,7 +120,7 @@ const StrikeOverlay = ({ count, lastStrikeTime, isHost }: { count: number, lastS
   );
 };
 
-const AnswerSlot = ({ answer, index, multiplier }: { answer?: any, index: number, multiplier: number }) => {
+const AnswerSlot = ({ answer, index, multiplier }: { answer?: Answer, index: number, multiplier: number }) => {
   if (!answer) {
     return (
       <div className="h-20 md:h-24 w-full bg-blue-900/30 border-2 border-blue-800/50 rounded flex items-center justify-center relative overflow-hidden">
@@ -123,7 +149,7 @@ const AnswerSlot = ({ answer, index, multiplier }: { answer?: any, index: number
 
 export default function Home() {
   const [view, setView] = useState<'landing' | 'host' | 'board' | 'fastmoney'>('landing');
-  const [gameState, setGameState] = useState<any>(null);
+  const [gameState, setGameState] = useState<GameState | null>(null);
   const [sessionCode, setSessionCode] = useState('');
   const [inputCode, setInputCode] = useState('');
   const [hostCode, setHostCode] = useState('');
@@ -163,7 +189,7 @@ export default function Home() {
   const fmAllAnswered = (() => {
     const fm = gameState?.fastMoney;
     if (!fm) return false;
-    return fm[fm.currentTeam]?.questions?.every((q: any) => q.revealed) ?? false;
+    return fm[fm.currentTeam]?.questions?.every((q) => q.revealed) ?? false;
   })();
 
   useEffect(() => {
@@ -195,10 +221,10 @@ export default function Home() {
     const currentTeam = fm.currentTeam;
     const teamData = fm[currentTeam];
     if (!teamData || teamData.completed) return;
-    const hasUnrevealed = teamData.questions?.some((q: any) => !q.revealed);
+    const hasUnrevealed = teamData.questions?.some((q) => !q.revealed);
     if (hasUnrevealed) {
       fmTimeUpFiredRef.current = true;
-      performAction('FAST_MONEY_TIME_UP');
+      performAction({ type: 'FAST_MONEY_TIME_UP' });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fmTimeRemaining]);
@@ -209,15 +235,7 @@ export default function Home() {
 
     const sessionRef = ref(db, `sessions/${newCode}`);
     await set(sessionRef, {
-      gameState: {
-        currentRoundIndex: 0,
-        scores: { team1: 0, team2: 0 },
-        roundPoints: 0,
-        strikes: 0,
-        lastStrikeTime: 0,
-        winner: null,
-        fastMoneyMode: false,
-      },
+      gameState: INITIAL_GAME_STATE,
       rounds: INITIAL_ROUNDS,
       fastMoneyQuestions: FAST_MONEY_QUESTIONS,
       hostCode: newHostCode,
@@ -289,11 +307,11 @@ export default function Home() {
     const gameRef = ref(db, `sessions/${sessionCode}/gameState`);
     const roundsRef = ref(db, `sessions/${sessionCode}/rounds`);
 
-    let previousGameState: any = null;
-    let previousRounds: any = null;
+    let previousGameState: GameState | null = null;
+    let previousRounds: Round[] | null = null;
 
     const unsubGame = onValue(gameRef, (snapshot) => {
-      const data = snapshot.val();
+      const data: GameState | null = snapshot.val();
       if (data) {
         if (data.winner && !previousGameState?.winner && view === 'board') {
           confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
@@ -310,7 +328,7 @@ export default function Home() {
           const newTeamData = data.fastMoney[currentTeam];
 
           if (prevTeamData && newTeamData && prevTeamData.questions && newTeamData.questions) {
-            const newlyRevealed = newTeamData.questions.find((q: any, idx: number) =>
+            const newlyRevealed = newTeamData.questions.find((q, idx) =>
               q.revealed && !prevTeamData.questions[idx]?.revealed
             );
 
@@ -330,14 +348,14 @@ export default function Home() {
     });
 
     const unsubRounds = onValue(roundsRef, (snapshot) => {
-      const data = snapshot.val();
+      const data: Round[] | null = snapshot.val();
       if (data) {
         if (previousRounds && previousRounds.length > 0 && !isHost && view === 'board') {
           const currentRoundIndex = previousGameState?.currentRoundIndex || 0;
           const prevRound = previousRounds[currentRoundIndex];
           const newRound = data[currentRoundIndex];
           if (prevRound && newRound) {
-            const newlyRevealed = newRound.answers.some((ans: any, idx: number) =>
+            const newlyRevealed = newRound.answers.some((ans, idx) =>
               ans.revealed && !prevRound.answers[idx]?.revealed
             );
             if (newlyRevealed) {
@@ -363,15 +381,7 @@ export default function Home() {
     if (!sessionCode) return;
 
     update(ref(db), {
-      [`sessions/${sessionCode}/gameState`]: {
-        currentRoundIndex: 0,
-        scores: { team1: 0, team2: 0 },
-        roundPoints: 0,
-        strikes: 0,
-        lastStrikeTime: 0,
-        winner: null,
-        fastMoneyMode: false,
-      },
+      [`sessions/${sessionCode}/gameState`]: INITIAL_GAME_STATE,
       [`sessions/${sessionCode}/rounds`]: INITIAL_ROUNDS,
       [`sessions/${sessionCode}/fastMoneyQuestions`]: FAST_MONEY_QUESTIONS,
     });
@@ -416,16 +426,16 @@ export default function Home() {
     }
   };
 
-  const performAction = (action: string, payload: any = {}) => {
+  const performAction = (action: Action) => {
     if (!gameState || !sessionCode) return;
-    const updates: any = {};
+    const updates: Record<string, unknown> = {};
     const currentRound = editedRounds[gameState.currentRoundIndex];
 
-    switch (action) {
+    switch (action.type) {
       case 'REVEAL_ANSWER':
-        const answer = currentRound.answers[payload.index];
+        const answer = currentRound.answers[action.index];
         if (!answer.revealed) {
-          updates[`sessions/${sessionCode}/rounds/${gameState.currentRoundIndex}/answers/${payload.index}/revealed`] = true;
+          updates[`sessions/${sessionCode}/rounds/${gameState.currentRoundIndex}/answers/${action.index}/revealed`] = true;
           updates[`sessions/${sessionCode}/gameState/roundPoints`] = gameState.roundPoints + (answer.points * currentRound.multiplier);
         }
         break;
@@ -442,11 +452,11 @@ export default function Home() {
         break;
 
       case 'AWARD_ROUND':
-        const currentScore = gameState.scores[payload.team];
-        updates[`sessions/${sessionCode}/gameState/scores/${payload.team}`] = currentScore + gameState.roundPoints;
+        const currentScore = gameState.scores[action.team];
+        updates[`sessions/${sessionCode}/gameState/scores/${action.team}`] = currentScore + gameState.roundPoints;
         updates[`sessions/${sessionCode}/gameState/roundPoints`] = 0;
         updates[`sessions/${sessionCode}/gameState/strikes`] = 0;
-        editedRounds[gameState.currentRoundIndex].answers.forEach((_: any, idx: number) => {
+        currentRound.answers.forEach((_, idx) => {
           updates[`sessions/${sessionCode}/rounds/${gameState.currentRoundIndex}/answers/${idx}/revealed`] = true;
         });
         break;
@@ -464,21 +474,15 @@ export default function Home() {
 
       case 'START_FAST_MONEY':
         // team that won the main game goes first
-        const winningTeam = gameState.scores.team1 > gameState.scores.team2 ? 'team1' : 'team2';
-        const losingTeam = winningTeam === 'team1' ? 'team2' : 'team1';
+        const winningTeam: TeamKey = gameState.scores.team1 > gameState.scores.team2 ? 'team1' : 'team2';
+        const losingTeam: TeamKey = winningTeam === 'team1' ? 'team2' : 'team1';
 
-        const sessionFastMoneyQuestions = payload.fastMoneyQuestions || FAST_MONEY_QUESTIONS;
-
-        const shuffleFMQuestions = (qs: any[]) => {
-          const arr = [...qs];
-          for (let i = arr.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [arr[i], arr[j]] = [arr[j], arr[i]];
-          }
-          return arr;
-        };
-        const team1Questions = shuffleFMQuestions(sessionFastMoneyQuestions);
-        const team2Questions = shuffleFMQuestions(sessionFastMoneyQuestions);
+        const toPlays = (qs: FastMoneyQuestion[]): FastMoneyPlay[] => shuffle(qs).map((q) => ({
+          ...q,
+          playerAnswer: '',
+          playerPoints: 0,
+          revealed: false,
+        }));
 
         updates[`sessions/${sessionCode}/gameState/fastMoneyMode`] = true;
         updates[`sessions/${sessionCode}/gameState/fastMoney`] = {
@@ -488,48 +492,33 @@ export default function Home() {
           currentQuestionIndex: 0,
           timerStartedAt: Date.now(),
           timerDuration: 45000,
-          team1: {
-            totalPoints: 0,
-            completed: false,
-            questions: team1Questions.map((q: any) => ({
-              ...q,
-              playerAnswer: '',
-              playerPoints: 0,
-              revealed: false,
-            })),
-          },
-          team2: {
-            totalPoints: 0,
-            completed: false,
-            questions: team2Questions.map((q: any) => ({
-              ...q,
-              playerAnswer: '',
-              playerPoints: 0,
-              revealed: false,
-            })),
-          },
+          team1: { totalPoints: 0, completed: false, questions: toPlays(action.fastMoneyQuestions) },
+          team2: { totalPoints: 0, completed: false, questions: toPlays(action.fastMoneyQuestions) },
           finalWinner: null,
         };
         setView('fastmoney');
         break;
 
-      case 'FAST_MONEY_REVEAL':
+      case 'FAST_MONEY_REVEAL': {
+        if (!gameState.fastMoney) break;
         const currentTeam = gameState.fastMoney.currentTeam;
         const teamData = gameState.fastMoney[currentTeam];
-        const fmQuestion = teamData.questions[payload.index];
+        const fmQuestion = teamData.questions[action.index];
 
         if (!fmQuestion.revealed) {
-          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${payload.index}/revealed`] = true;
-          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${payload.index}/playerAnswer`] = payload.answer || 'No Answer';
-          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${payload.index}/playerPoints`] = payload.points || 0;
-          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/totalPoints`] = teamData.totalPoints + (payload.points || 0);
-          if (payload.index < teamData.questions.length - 1) {
-            updates[`sessions/${sessionCode}/gameState/fastMoney/currentQuestionIndex`] = payload.index + 1;
+          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${action.index}/revealed`] = true;
+          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${action.index}/playerAnswer`] = action.answer || 'No Answer';
+          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/questions/${action.index}/playerPoints`] = action.points;
+          updates[`sessions/${sessionCode}/gameState/fastMoney/${currentTeam}/totalPoints`] = teamData.totalPoints + action.points;
+          if (action.index < teamData.questions.length - 1) {
+            updates[`sessions/${sessionCode}/gameState/fastMoney/currentQuestionIndex`] = action.index + 1;
           }
         }
         break;
+      }
 
-      case 'FAST_MONEY_SWITCH_TEAM':
+      case 'FAST_MONEY_SWITCH_TEAM': {
+        if (!gameState.fastMoney) break;
         const completingTeam = gameState.fastMoney.currentTeam;
         updates[`sessions/${sessionCode}/gameState/fastMoney/${completingTeam}/completed`] = true;
 
@@ -539,8 +528,10 @@ export default function Home() {
         updates[`sessions/${sessionCode}/gameState/fastMoney/timerStartedAt`] = Date.now();
         updates[`sessions/${sessionCode}/gameState/fastMoney/timerDuration`] = 30000;
         break;
+      }
 
-      case 'FAST_MONEY_FINISH':
+      case 'FAST_MONEY_FINISH': {
+        if (!gameState.fastMoney) break;
         const currentFMTeam = gameState.fastMoney.currentTeam;
         updates[`sessions/${sessionCode}/gameState/fastMoney/${currentFMTeam}/completed`] = true;
 
@@ -551,13 +542,15 @@ export default function Home() {
         updates[`sessions/${sessionCode}/gameState/fastMoney/finalWinner`] = fastMoneyWinner;
         updates[`sessions/${sessionCode}/gameState/winner`] = fastMoneyWinner === 'tie' ? 'Draw' : (fastMoneyWinner === 'team1' ? 'Team 1' : 'Team 2');
         break;
+      }
 
       case 'FAST_MONEY_TIME_UP': {
+        if (!gameState.fastMoney) break;
         const timeUpTeam = gameState.fastMoney.currentTeam;
         const timeUpTeamData = gameState.fastMoney[timeUpTeam];
 
         const isWinningTeam = timeUpTeam === gameState.fastMoney.winningTeam;
-        timeUpTeamData.questions.forEach((q: any, idx: number) => {
+        timeUpTeamData.questions.forEach((q, idx) => {
           if (!q.revealed) {
             updates[`sessions/${sessionCode}/gameState/fastMoney/${timeUpTeam}/questions/${idx}/revealed`] = true;
             updates[`sessions/${sessionCode}/gameState/fastMoney/${timeUpTeam}/questions/${idx}/playerAnswer`] = 'No Answer / Pass';
@@ -724,14 +717,14 @@ export default function Home() {
     const currentTeam = fastMoney.currentTeam;
     const currentTeamData = fastMoney[currentTeam];
     const currentQ = currentTeamData.questions[fastMoney.currentQuestionIndex];
-    const allRevealed = currentTeamData.questions.every((q: any) => q.revealed);
+    const allRevealed = currentTeamData.questions.every((q) => q.revealed);
     const bothTeamsComplete = fastMoney.team1.completed && fastMoney.team2.completed;
 
     // second team can't give the same answer as the first
     const winningTeam = fastMoney.winningTeam;
     const losingTeam = fastMoney.losingTeam;
     const firstTeamAnswer = currentTeam === losingTeam
-      ? fastMoney[winningTeam].questions.find((q: any) => q.question === currentQ.question)?.playerAnswer
+      ? fastMoney[winningTeam].questions.find((q) => q.question === currentQ.question)?.playerAnswer
       : null;
 
     // Host View
@@ -808,7 +801,7 @@ export default function Home() {
                 {currentTeam === 'team1' ? 'Team 1' : 'Team 2'} Questions
               </h3>
               <div className="space-y-3">
-                {currentTeamData.questions.map((q: any, idx: number) => (
+                {currentTeamData.questions.map((q, idx) => (
                   <div
                     key={idx}
                     className={`p-4 rounded-lg border-2 ${
@@ -834,7 +827,7 @@ export default function Home() {
                           <strong>Answer:</strong> {q.playerAnswer}
                         </div>
                         <div className="text-xs text-gray-500 mt-1">
-                          <strong>All Answers:</strong> {q.answers.map((a: any) => `${a.text} (${a.score})`).join(', ')}
+                          <strong>All Answers:</strong> {q.answers.map((a) => `${a.text} (${a.score})`).join(', ')}
                         </div>
                       </div>
                     )}
@@ -861,12 +854,13 @@ export default function Home() {
                       </p>
                     )}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      {currentQ.answers.map((answer: any, idx: number) => {
+                      {currentQ.answers.map((answer, idx) => {
                         const isDisabled = firstTeamAnswer === answer.text;
                         return (
                           <button
                             key={idx}
-                            onClick={() => !isDisabled && performAction('FAST_MONEY_REVEAL', {
+                            onClick={() => !isDisabled && performAction({
+                              type: 'FAST_MONEY_REVEAL',
                               index: fastMoney.currentQuestionIndex,
                               answer: answer.text,
                               points: answer.score,
@@ -890,7 +884,8 @@ export default function Home() {
                         );
                       })}
                       <button
-                        onClick={() => performAction('FAST_MONEY_REVEAL', {
+                        onClick={() => performAction({
+                          type: 'FAST_MONEY_REVEAL',
                           index: fastMoney.currentQuestionIndex,
                           answer: 'No Answer / Pass',
                           points: 0,
@@ -914,7 +909,7 @@ export default function Home() {
                   {currentTeamData.totalPoints} Points
                 </div>
                 <button
-                  onClick={() => performAction('FAST_MONEY_SWITCH_TEAM')}
+                  onClick={() => performAction({ type: 'FAST_MONEY_SWITCH_TEAM' })}
                   className="px-8 py-4 bg-yellow-400 hover:bg-yellow-500 text-blue-900 rounded-xl font-bold text-lg shadow-lg transition"
                 >
                   Switch to {currentTeam === 'team1' ? 'Team 2' : 'Team 1'} →
@@ -936,7 +931,7 @@ export default function Home() {
                   </div>
                 </div>
                 <button
-                  onClick={() => performAction('FAST_MONEY_FINISH')}
+                  onClick={() => performAction({ type: 'FAST_MONEY_FINISH' })}
                   className="px-8 py-4 bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white rounded-xl font-bold text-lg shadow-lg transition"
                 >
                   Reveal Winner
@@ -1044,7 +1039,7 @@ export default function Home() {
 
         {!bothTeamsComplete && (
           <div className="w-full max-w-5xl mx-auto space-y-3">
-            {currentTeamData.questions.map((q: any, idx: number) => {
+            {currentTeamData.questions.map((q, idx) => {
               const isActive = idx === fastMoney.currentQuestionIndex && !q.revealed;
               const isFuture = idx > fastMoney.currentQuestionIndex && !q.revealed;
               const blurQuestion = q.timedOut === true;
@@ -1093,10 +1088,10 @@ export default function Home() {
 
         {bothTeamsComplete && (() => {
           // questions are shuffled per team, so line rows up by question
-          const winningQs: any[] = fastMoney[winningTeam].questions;
-          const losingQs: any[] = winningQs.map((wq: any) =>
-            fastMoney[losingTeam].questions.find((lq: any) => lq.question === wq.question)
-          ).filter(Boolean);
+          const winningQs = fastMoney[winningTeam].questions;
+          const losingQs = winningQs.map((wq) =>
+            fastMoney[losingTeam].questions.find((lq) => lq.question === wq.question)
+          ).filter((q) => q !== undefined);
           const team1DisplayQs = winningTeam === 'team1' ? winningQs : losingQs;
           const team2DisplayQs = winningTeam === 'team2' ? winningQs : losingQs;
           return (
@@ -1104,7 +1099,7 @@ export default function Home() {
             <div className="grid grid-cols-2 gap-6">
               <div className="space-y-2">
                 <h3 className="text-2xl font-black text-center mb-3 text-blue-300">TEAM 1</h3>
-                {team1DisplayQs.map((q: any, idx: number) => (
+                {team1DisplayQs.map((q, idx) => (
                   <div key={idx} className="bg-blue-900/50 p-3 rounded-lg border border-blue-700">
                     <div className="flex justify-between items-center">
                       <div className="flex-1">
@@ -1126,7 +1121,7 @@ export default function Home() {
 
               <div className="space-y-2">
                 <h3 className="text-2xl font-black text-center mb-3 text-red-300">TEAM 2</h3>
-                {team2DisplayQs.map((q: any, idx: number) => (
+                {team2DisplayQs.map((q, idx) => (
                   <div key={idx} className="bg-red-900/50 p-3 rounded-lg border border-red-700">
                     <div className="flex justify-between items-center">
                       <div className="flex-1">
@@ -1638,10 +1633,10 @@ export default function Home() {
               <span className="bg-blue-100 p-2 rounded"><Eye size={16} /></span> Reveal Answers
             </h3>
             <div className="space-y-2">
-              {currentRound.answers.map((ans: any, idx: number) => (
+              {currentRound.answers.map((ans, idx) => (
                 <button
                   key={idx}
-                  onClick={() => performAction('REVEAL_ANSWER', { index: idx })}
+                  onClick={() => performAction({ type: 'REVEAL_ANSWER', index: idx })}
                   disabled={ans.revealed}
                   className={`w-full flex justify-between px-4 py-3 rounded-lg border-2 text-left transition-all ${
                     ans.revealed
@@ -1668,13 +1663,13 @@ export default function Home() {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <button
-                  onClick={() => performAction('ADD_STRIKE')}
+                  onClick={() => performAction({ type: 'ADD_STRIKE' })}
                   className="bg-red-600 hover:bg-red-700 text-white font-bold py-3 rounded-lg shadow-md transition transform active:scale-95 hover:shadow-lg"
                 >
                   STRIKE (+1)
                 </button>
                 <button
-                  onClick={() => performAction('CLEAR_STRIKES')}
+                  onClick={() => performAction({ type: 'CLEAR_STRIKES' })}
                   className="bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-3 rounded-lg shadow-md transition hover:shadow-lg"
                 >
                   Clear
@@ -1691,20 +1686,20 @@ export default function Home() {
               </div>
               <div className="grid grid-cols-2 gap-3 mb-4">
                 <button
-                  onClick={() => performAction('AWARD_ROUND', { team: 'team1' })}
+                  onClick={() => performAction({ type: 'AWARD_ROUND', team: 'team1' })}
                   className="bg-blue-500 hover:bg-blue-600 text-white py-3 rounded-lg font-bold border-2 border-blue-400 shadow-md transition hover:shadow-lg"
                 >
                   Award Team 1
                 </button>
                 <button
-                  onClick={() => performAction('AWARD_ROUND', { team: 'team2' })}
+                  onClick={() => performAction({ type: 'AWARD_ROUND', team: 'team2' })}
                   className="bg-blue-500 hover:bg-blue-600 text-white py-3 rounded-lg font-bold border-2 border-blue-400 shadow-md transition hover:shadow-lg"
                 >
                   Award Team 2
                 </button>
               </div>
               <button
-                onClick={() => performAction('NEXT_ROUND')}
+                onClick={() => performAction({ type: 'NEXT_ROUND' })}
                 className="w-full bg-gradient-to-r from-yellow-400 to-yellow-500 hover:from-yellow-500 hover:to-yellow-600 text-yellow-900 font-bold py-4 rounded-lg shadow-lg flex items-center justify-center gap-2 transition transform active:scale-95 hover:shadow-xl text-lg"
               >
                 {gameState.currentRoundIndex < editedRounds.length - 1 ? 'Start Next Round' : 'End Game'} <Play size={20} />
@@ -1722,7 +1717,7 @@ export default function Home() {
                     const fastMoneyRef = ref(db, `sessions/${sessionCode}/fastMoneyQuestions`);
                     const snapshot = await get(fastMoneyRef);
                     const fastMoneyQuestions = snapshot.exists() ? snapshot.val() : FAST_MONEY_QUESTIONS;
-                    performAction('START_FAST_MONEY', { fastMoneyQuestions });
+                    performAction({ type: 'START_FAST_MONEY', fastMoneyQuestions });
                   }}
                   className="w-full bg-yellow-400 hover:bg-yellow-500 text-purple-900 font-bold py-3 rounded-lg shadow-lg flex items-center justify-center gap-2 transition hover:shadow-xl"
                 >
